@@ -386,6 +386,108 @@ pub fn clifford_fir_forward(
     fir_cycle_forward(batch, features, n_vertices, d, &two_bank)
 }
 
+/// Which gradients [`clifford_fir_backward_with`] is required to produce.
+///
+/// An enum rather than a `bool` so the call site reads as intent, and so a third
+/// mode (feature-gradient-only) can be added without changing any signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradRequest {
+    /// Filter coefficients only (`∇a`, `∇b`).
+    ///
+    /// Peak heap is `O(threads · k)` — the worker accumulators hold `2k` floats
+    /// each. This is what a training step wants when the input features are data
+    /// rather than parameters.
+    ParamsOnly,
+    /// Filter coefficients **and** the feature gradient `∇X`.
+    ///
+    /// Peak heap is `O(threads · n_vertices · d)`: correctness requires one
+    /// private `∇X` accumulator per worker to avoid atomic contention on hub
+    /// vertices. Ask for this only when `∇X` is actually consumed.
+    Full,
+}
+
+/// Output of [`clifford_fir_backward_with`].
+///
+/// `grad_features` is an `Option` deliberately: a caller that asks for
+/// [`GradRequest::ParamsOnly`] and then reads `∇X` fails to **compile** rather
+/// than silently training against a zero gradient.
+///
+/// No `PartialEq` derive: `CliffordFIR` does not implement it, and widening that
+/// is out of scope here — tests compare the `Vec<f32>` fields directly.
+#[derive(Debug, Clone)]
+pub struct FirBackward {
+    /// `∇X`, shape `(n_vertices * d)`. `Some` iff [`GradRequest::Full`].
+    pub grad_features: Option<Vec<f32>>,
+    /// `∇a`, `∇b`, shape `(k,)` each.
+    pub grad_fir: CliffordFIR,
+}
+
+/// One worker's slice of the accumulation.
+///
+/// `grad_features` is empty for [`GradRequest::ParamsOnly`] and never touched:
+/// the `FULL` const generic on [`accumulate_chunk`] removes the branch at
+/// monomorphisation, so the lean path costs nothing for the field's existence.
+struct ThreadAccum {
+    grad_features: Vec<f32>,
+    grad_a: Vec<f32>,
+    grad_b: Vec<f32>,
+}
+
+/// Accumulate one contiguous cycle range into a single worker's buffers.
+///
+/// Generic over `FULL` so the two gradient modes share this loop verbatim
+/// instead of keeping two near-identical copies (CLAUDE.md §6.1); because it is
+/// a const generic, the `if FULL` disappears at compile time rather than being
+/// evaluated per cycle.
+///
+/// # Preconditions
+/// `range` is within `0..batch.len()`; `acc.grad_a`/`grad_b` have length `k`;
+/// when `FULL`, `acc.grad_features` has length `n_vertices * d`.
+///
+/// # Postconditions
+/// Adds this range's contribution to `acc`; reads nothing it does not index.
+#[inline(always)]
+fn accumulate_chunk<const FULL: bool>(
+    batch: &TopKCyclesBatch,
+    features: &[f32],
+    d: usize,
+    fir: &CliffordFIR,
+    grad_out: &[f32],
+    range: core::ops::Range<usize>,
+    acc: &mut ThreadAccum,
+) {
+    let k = batch.k;
+    for ci in range {
+        let c_start = ci * k;
+        let o_start = ci * d;
+        let go = &grad_out[o_start..o_start + d];
+        for i in 0..k {
+            let v = batch.cycles[c_start + i] as usize;
+            let sgn = batch.signs[c_start + i];
+            let f_start = v * d;
+            let f = &features[f_start..f_start + d];
+            // <go, f> ⟶ contributes to grad_a[i] or grad_b[i]
+            let mut dot = 0.0f32;
+            for j in 0..d {
+                dot += go[j] * f[j];
+            }
+            if sgn > 0 {
+                acc.grad_a[i] += dot;
+            } else {
+                acc.grad_b[i] += dot;
+            }
+            if FULL {
+                // ∂L/∂X[v][j] += coef · go[j]
+                let coef = if sgn > 0 { fir.a[i] } else { fir.b[i] };
+                let gf = &mut acc.grad_features[f_start..f_start + d];
+                for j in 0..d {
+                    gf[j] += coef * go[j];
+                }
+            }
+        }
+    }
+}
+
 /// Closed-form Clifford-derivative backward for the signed-cycle FIR.
 ///
 /// Given the per-cycle forward output gradient `grad_out` of shape
@@ -397,16 +499,108 @@ pub fn clifford_fir_forward(
 ///    (one Clifford multivector per filter position, scalar and
 ///    pseudoscalar parts accumulated independently)
 ///
-/// 2. **Feature gradient** `(n_vertices * d)`:
+/// 2. **Feature gradient** `(n_vertices * d)`, only when `req` is
+///    [`GradRequest::Full`]:
 ///    `∇X[v][j] = Σ_{c, i: v_i=v} proj_{σ_i}(k_i) · grad_out_c[j]`
 ///
-/// No autograd, no PyTorch, no graph tracing. Lockless atomic-add
-/// accumulation across rayon workers (closure captures
-/// `AtomicU32`-wrapped buffers and CAS-updates them).
+/// No autograd, no PyTorch, no graph tracing. Accumulation is **per-worker into
+/// private buffers**, reduced in a fixed chunk order at the end — not atomics.
+/// (An earlier revision of this doc claimed `AtomicU32` CAS accumulation; that
+/// has not matched the code for some time. Corrected 2026-08-16.)
 ///
-/// # Returns
-/// `(grad_features, grad_fir)` where shapes match `features` and
-/// `fir` respectively.
+/// # Cost
+/// [`GradRequest::ParamsOnly`] allocates `O(threads · k)`;
+/// [`GradRequest::Full`] allocates `O(threads · n_vertices · d)` and pays a
+/// serial reduction of the same size. At Slashdot shape
+/// (`n_vertices = 82_140`, `d = 32`) that is 10 MiB **per worker**, which is why
+/// the training path must not ask for it — see
+/// `reports/2026-08-16-nagare-cpu-memory-benchmark.md` §6b-bis.
+///
+/// # Determinism
+/// Both modes use the same chunking and the same fixed-order reduction, so
+/// `∇a`/`∇b` are bit-identical between them at equal thread count. Results do
+/// depend on the thread count through that reduction order — a pre-existing
+/// property of this kernel, unchanged here.
+///
+/// # Panics
+/// If `fir.k() != batch.k`, `features.len() != n_vertices * d`, or
+/// `grad_out.len() != n_cycles * d`.
+pub fn clifford_fir_backward_with(
+    batch: &TopKCyclesBatch,
+    features: &[f32],
+    n_vertices: usize,
+    d: usize,
+    fir: &CliffordFIR,
+    grad_out: &[f32],
+    req: GradRequest,
+) -> FirBackward {
+    let k = batch.k;
+    let n_cycles = batch.len();
+    assert_eq!(fir.k(), k);
+    assert_eq!(features.len(), n_vertices * d);
+    assert_eq!(grad_out.len(), n_cycles * d);
+
+    let full = req == GradRequest::Full;
+    // Per-worker accumulators avoid atomic contention on hub vertices.
+    // Reduced in index order at the end, which keeps the result reproducible
+    // for a given thread count.
+    let n_threads = rayon::current_num_threads().max(1);
+    let cycles_per_thread = n_cycles.div_ceil(n_threads);
+
+    let mut accums: Vec<ThreadAccum> = (0..n_threads)
+        .map(|_| ThreadAccum {
+            // The lean path allocates nothing per worker beyond 2k floats.
+            grad_features: if full {
+                vec![0.0f32; n_vertices * d]
+            } else {
+                Vec::new()
+            },
+            grad_a: vec![0.0f32; k],
+            grad_b: vec![0.0f32; k],
+        })
+        .collect();
+
+    use rayon::prelude::IntoParallelRefMutIterator;
+    accums.par_iter_mut().enumerate().for_each(|(t, acc)| {
+        let start = (t * cycles_per_thread).min(n_cycles);
+        let end = ((t + 1) * cycles_per_thread).min(n_cycles);
+        if full {
+            accumulate_chunk::<true>(batch, features, d, fir, grad_out, start..end, acc);
+        } else {
+            accumulate_chunk::<false>(batch, features, d, fir, grad_out, start..end, acc);
+        }
+    });
+
+    // Reduce per-worker accumulators, in index order.
+    let mut grad_a = vec![0.0f32; k];
+    let mut grad_b = vec![0.0f32; k];
+    let mut grad_features = full.then(|| vec![0.0f32; n_vertices * d]);
+    for acc in &accums {
+        for i in 0..k {
+            grad_a[i] += acc.grad_a[i];
+            grad_b[i] += acc.grad_b[i];
+        }
+        if let Some(gf) = grad_features.as_mut() {
+            for (dst, src) in gf.iter_mut().zip(acc.grad_features.iter()) {
+                *dst += *src;
+            }
+        }
+    }
+    FirBackward {
+        grad_features,
+        grad_fir: CliffordFIR { a: grad_a, b: grad_b },
+    }
+}
+
+/// [`GradRequest::Full`] backward, returning `(∇X, ∇fir)`.
+///
+/// Retained unchanged for callers that consume the feature gradient — currently
+/// `gomb_shell`, which sums `∇X` across filter banks. A training step whose
+/// features are inputs rather than parameters should call
+/// [`clifford_fir_backward_with`] with [`GradRequest::ParamsOnly`] instead.
+///
+/// # Panics
+/// See [`clifford_fir_backward_with`].
 pub fn clifford_fir_backward(
     batch: &TopKCyclesBatch,
     features: &[f32],
@@ -415,81 +609,20 @@ pub fn clifford_fir_backward(
     fir: &CliffordFIR,
     grad_out: &[f32],
 ) -> (Vec<f32>, CliffordFIR) {
-    let k = batch.k;
-    let n_cycles = batch.len();
-    assert_eq!(fir.k(), k);
-    assert_eq!(features.len(), n_vertices * d);
-    assert_eq!(grad_out.len(), n_cycles * d);
-
-    // Per-thread accumulators avoid atomic contention on hub vertices
-    // (plan.tex §Risk anticipation).  Reduced at the end.
-    let n_threads = rayon::current_num_threads().max(1);
-    let cycles_per_thread = n_cycles.div_ceil(n_threads);
-
-    // ThreadAccum bundles all three thread-local buffers so a single
-    // Rayon `into_par_iter()` over a Vec<ThreadAccum> owns each slot
-    // exclusively (no raw pointers, no unsafe).
-    struct ThreadAccum {
-        grad_features: Vec<f32>,
-        grad_a: Vec<f32>,
-        grad_b: Vec<f32>,
-    }
-    let mut accums: Vec<ThreadAccum> = (0..n_threads)
-        .map(|_| ThreadAccum {
-            grad_features: vec![0.0f32; n_vertices * d],
-            grad_a: vec![0.0f32; k],
-            grad_b: vec![0.0f32; k],
-        })
-        .collect();
-
-    use rayon::prelude::IntoParallelRefMutIterator;
-    accums.par_iter_mut().enumerate().for_each(|(t, acc)| {
-        let start = t * cycles_per_thread;
-        let end = ((t + 1) * cycles_per_thread).min(n_cycles);
-        for ci in start..end {
-            let c_start = ci * k;
-            let s_start = ci * k;
-            let o_start = ci * d;
-            let go = &grad_out[o_start..o_start + d];
-            for i in 0..k {
-                let v = batch.cycles[c_start + i] as usize;
-                let sgn = batch.signs[s_start + i];
-                let coef = if sgn > 0 { fir.a[i] } else { fir.b[i] };
-                let f_start = v * d;
-                let f = &features[f_start..f_start + d];
-                // <go, f> ⟶ contributes to grad_a[i] or grad_b[i]
-                let mut dot = 0.0f32;
-                for j in 0..d {
-                    dot += go[j] * f[j];
-                }
-                if sgn > 0 {
-                    acc.grad_a[i] += dot;
-                } else {
-                    acc.grad_b[i] += dot;
-                }
-                // ∂L/∂X[v][j] += coef · go[j]
-                let gf = &mut acc.grad_features[f_start..f_start + d];
-                for j in 0..d {
-                    gf[j] += coef * go[j];
-                }
-            }
-        }
-    });
-
-    // Reduce per-thread accumulators.
-    let mut grad_a = vec![0.0f32; k];
-    let mut grad_b = vec![0.0f32; k];
-    let mut grad_features = vec![0.0f32; n_vertices * d];
-    for acc in &accums {
-        for i in 0..k {
-            grad_a[i] += acc.grad_a[i];
-            grad_b[i] += acc.grad_b[i];
-        }
-        for i in 0..(n_vertices * d) {
-            grad_features[i] += acc.grad_features[i];
-        }
-    }
-    (grad_features, CliffordFIR { a: grad_a, b: grad_b })
+    let out = clifford_fir_backward_with(
+        batch,
+        features,
+        n_vertices,
+        d,
+        fir,
+        grad_out,
+        GradRequest::Full,
+    );
+    (
+        out.grad_features
+            .expect("GradRequest::Full always yields grad_features"),
+        out.grad_fir,
+    )
 }
 
 #[cfg(test)]
@@ -691,5 +824,89 @@ mod tests {
         for (a, b) in out1.iter().zip(out2.iter()) {
             assert!((a - b).abs() < 1e-7);
         }
+    }
+
+    // ── GradRequest (added 2026-08-16) ────────────────────────────────────────
+
+    /// Deterministic fixture large enough to span several worker chunks.
+    fn grad_fixture() -> (TopKCyclesBatch, Vec<f32>, CliffordFIR, Vec<f32>, usize, usize) {
+        const N_VERTICES: usize = 64;
+        const D: usize = 8;
+        const K: usize = 3;
+        const N_CYCLES: usize = 300;
+        let mut cycles: Vec<u32> = Vec::with_capacity(N_CYCLES * K);
+        let mut signs: Vec<i8> = Vec::with_capacity(N_CYCLES * K);
+        for ci in 0..N_CYCLES as u32 {
+            cycles.extend_from_slice(&[ci % 64, (ci * 7 + 3) % 64, (ci * 13 + 5) % 64]);
+            signs.extend_from_slice(&[1, -1, if ci % 3 == 0 { 1 } else { -1 }]);
+        }
+        let batch = make_batch(cycles, signs, K);
+        let features: Vec<f32> = (0..N_VERTICES * D)
+            .map(|i| (i as f32 * 0.37).sin())
+            .collect();
+        let fir = CliffordFIR::new(vec![0.7, -0.2, 0.5], vec![-0.3, 0.4, -0.1]);
+        let grad_out: Vec<f32> = (0..N_CYCLES * D).map(|i| (i as f32 * 0.11).cos()).collect();
+        (batch, features, fir, grad_out, N_VERTICES, D)
+    }
+
+    /// `ParamsOnly` must produce **bit-identical** filter gradients to `Full`.
+    /// Both modes share the chunking and the fixed-order reduction, so equality
+    /// is exact, not approximate — asserted with `==`, deliberately.
+    #[test]
+    fn params_only_matches_full_bit_exactly() {
+        let (batch, features, fir, grad_out, n, d) = grad_fixture();
+        let full = clifford_fir_backward_with(
+            &batch, &features, n, d, &fir, &grad_out, GradRequest::Full,
+        );
+        let lean = clifford_fir_backward_with(
+            &batch, &features, n, d, &fir, &grad_out, GradRequest::ParamsOnly,
+        );
+        assert_eq!(lean.grad_fir.a, full.grad_fir.a, "∇a diverged between modes");
+        assert_eq!(lean.grad_fir.b, full.grad_fir.b, "∇b diverged between modes");
+    }
+
+    /// The lean mode must not hand back a feature gradient at all — an empty
+    /// `Vec` would be a silent zero-gradient trap for a mis-wired caller.
+    #[test]
+    fn params_only_yields_no_feature_gradient() {
+        let (batch, features, fir, grad_out, n, d) = grad_fixture();
+        let lean = clifford_fir_backward_with(
+            &batch, &features, n, d, &fir, &grad_out, GradRequest::ParamsOnly,
+        );
+        assert!(lean.grad_features.is_none());
+    }
+
+    /// `Full` still yields a correctly-shaped, non-trivial `∇X`, and the legacy
+    /// tuple wrapper agrees with it exactly.
+    #[test]
+    fn full_yields_feature_gradient_and_wrapper_agrees() {
+        let (batch, features, fir, grad_out, n, d) = grad_fixture();
+        let full = clifford_fir_backward_with(
+            &batch, &features, n, d, &fir, &grad_out, GradRequest::Full,
+        );
+        let gf = full.grad_features.clone().expect("Full yields ∇X");
+        assert_eq!(gf.len(), n * d);
+        assert!(gf.iter().any(|v| v.abs() > 1e-9), "∇X is entirely zero");
+
+        let (gf_legacy, fir_legacy) =
+            clifford_fir_backward(&batch, &features, n, d, &fir, &grad_out);
+        assert_eq!(gf_legacy, gf, "legacy wrapper diverged from GradRequest::Full");
+        assert_eq!(fir_legacy.a, full.grad_fir.a);
+        assert_eq!(fir_legacy.b, full.grad_fir.b);
+    }
+
+    /// Regression guard for the empty-range case: with more workers than cycles,
+    /// the tail chunks are empty and their start index must be clamped.
+    #[test]
+    fn handles_more_workers_than_cycles() {
+        let batch = make_batch(vec![0, 1, 2], vec![1, -1, 1], 3);
+        let features: Vec<f32> = (0..3 * 4).map(|i| i as f32).collect();
+        let fir = CliffordFIR::signed_mean(3);
+        let grad_out = vec![0.5f32; 4];
+        let out = clifford_fir_backward_with(
+            &batch, &features, 3, 4, &fir, &grad_out, GradRequest::ParamsOnly,
+        );
+        assert_eq!(out.grad_fir.a.len(), 3);
+        assert!(out.grad_fir.a.iter().all(|v| v.is_finite()));
     }
 }
