@@ -44,7 +44,7 @@
 
 use core::fmt;
 
-use crate::algebra::{Multivector, Signature};
+use crate::algebra::{Multivector, Signature, quat_conjugate, quat_rotate};
 
 /// Dimension of the algebra these chains live in: `Cl(3,0)`.
 const N: usize = 3;
@@ -93,6 +93,23 @@ impl fmt::Display for ChainError {
 }
 
 impl std::error::Error for ChainError {}
+
+/// Which substrate evaluates the sweep.
+///
+/// Both compute the same derivative; they differ in arithmetic and therefore in
+/// the last few bits. A `Strategy` selector rather than a second function family,
+/// so a third substrate does not become a third set of names (§6.5 #1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    /// General `Cl(3,0)` rotors through [`Multivector::geo`], `f64` throughout.
+    /// Exact to `f64`, and the reference the other backends are checked against.
+    #[default]
+    Multivector,
+    /// The quaternion fast path — `f32` internally, ~13x cheaper per rotation
+    /// (`reports/2026-08-16-clifford-adjoint.md`). Accurate to `f32`, which is
+    /// what every hot caller in Nagare already uses.
+    Quaternion,
+}
 
 /// Output of one forward-plus-adjoint sweep.
 #[derive(Debug, Clone, PartialEq)]
@@ -223,8 +240,11 @@ impl RotorChain {
         Ok(Self::from_mv(&x))
     }
 
-    /// Forward sweep plus reverse sweep: every `∂L/∂θᵢ` and `∂L/∂v` in
-    /// **`O(k)`**, given the upstream gradient `∂L/∂w`.
+    /// Forward sweep plus reverse sweep on the default ([`Backend::Multivector`])
+    /// substrate. See [`Self::adjoint_with`] to choose.
+    ///
+    /// Every `∂L/∂θᵢ` and `∂L/∂v` in **`O(k)`**, given the upstream gradient
+    /// `∂L/∂w`.
     ///
     /// # Preconditions
     /// `angles.len() == self.len()`; all inputs finite.
@@ -238,6 +258,101 @@ impl RotorChain {
     /// # Errors
     /// [`ChainError::AngleCount`] or [`ChainError::NotFinite`].
     pub fn adjoint(
+        &self,
+        angles: &[f64],
+        v: [f64; 3],
+        grad_out: [f64; 3],
+    ) -> Result<Adjoint, ChainError> {
+        self.adjoint_with(angles, v, grad_out, Backend::Multivector)
+    }
+
+    /// Forward-plus-adjoint sweep on a chosen substrate.
+    ///
+    /// The recurrence is identical; only the arithmetic differs.
+    /// [`Backend::Quaternion`] runs the same `O(k)` two-sweep algorithm through
+    /// `quat_rotate` and `quat_conjugate` at `f32`, which is the substrate every
+    /// hot caller already uses and roughly 13x cheaper per rotation.
+    ///
+    /// # Preconditions
+    /// As [`Self::adjoint`].
+    ///
+    /// # Postconditions
+    /// Agrees with [`Backend::Multivector`] to `f32` tolerance — not bitwise, and
+    /// not claimed to be. `grad_angles.len() == self.len()`.
+    ///
+    /// # Errors
+    /// [`ChainError::AngleCount`] or [`ChainError::NotFinite`].
+    pub fn adjoint_with(
+        &self,
+        angles: &[f64],
+        v: [f64; 3],
+        grad_out: [f64; 3],
+        backend: Backend,
+    ) -> Result<Adjoint, ChainError> {
+        match backend {
+            Backend::Multivector => self.adjoint_multivector(angles, v, grad_out),
+            Backend::Quaternion => self.adjoint_quaternion(angles, v, grad_out),
+        }
+    }
+
+    /// Unit quaternion for link `i` at `theta`: `cos(θ/2) + sin(θ/2)·ω`.
+    ///
+    /// Built directly rather than through [`crate::cayley_to_unit_quat`], whose
+    /// Cayley parameterisation diverges at `θ → ±π`.
+    fn quat(&self, i: usize, theta: f64) -> [f32; 4] {
+        let a = self.axes[i];
+        let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
+        [
+            c as f32,
+            (s * a[0]) as f32,
+            (s * a[1]) as f32,
+            (s * a[2]) as f32,
+        ]
+    }
+
+    fn adjoint_quaternion(
+        &self,
+        angles: &[f64],
+        v: [f64; 3],
+        grad_out: [f64; 3],
+    ) -> Result<Adjoint, ChainError> {
+        self.check_angles(angles)?;
+        if !grad_out.iter().all(|c| c.is_finite()) {
+            return Err(ChainError::NotFinite { what: "grad_out" });
+        }
+        let k = self.axes.len();
+
+        // Forward, keeping every intermediate — the O(k) memory the reverse sweep
+        // trades for its O(k) time. 12 bytes per link against a Multivector's
+        // 8 * 2^n.
+        let mut trace: Vec<[f32; 3]> = Vec::with_capacity(k + 1);
+        trace.push([v[0] as f32, v[1] as f32, v[2] as f32]);
+        for (i, &theta) in angles.iter().enumerate() {
+            let next = quat_rotate(self.quat(i, theta), trace[i]);
+            trace.push(next);
+        }
+
+        // Backward: one pass, last link first.
+        let mut adj = [grad_out[0] as f32, grad_out[1] as f32, grad_out[2] as f32];
+        let mut grad_angles = vec![0.0f64; k];
+        for i in (0..k).rev() {
+            let x = trace[i + 1];
+            let w = self.axes[i];
+            // ∂L/∂θᵢ = ā · (ω × x)
+            grad_angles[i] = adj[0] as f64 * (w[1] * x[2] as f64 - w[2] * x[1] as f64)
+                + adj[1] as f64 * (w[2] * x[0] as f64 - w[0] * x[2] as f64)
+                + adj[2] as f64 * (w[0] * x[1] as f64 - w[1] * x[0] as f64);
+            adj = quat_rotate(quat_conjugate(self.quat(i, angles[i])), adj);
+        }
+
+        Ok(Adjoint {
+            value: [trace[k][0] as f64, trace[k][1] as f64, trace[k][2] as f64],
+            grad_angles,
+            grad_input: [adj[0] as f64, adj[1] as f64, adj[2] as f64],
+        })
+    }
+
+    fn adjoint_multivector(
         &self,
         angles: &[f64],
         v: [f64; 3],
@@ -414,5 +529,103 @@ mod tests {
         let w = chain.apply(&[0.3, -1.1, 2.0], v).expect("apply");
         let after = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
         assert!((after - before).abs() < 1e-12, "{before} → {after}");
+    }
+
+    /// The two substrates must agree to `f32` tolerance. They share no
+    /// arithmetic — one goes through `Multivector::geo` at `f64`, the other
+    /// through `quat_rotate` at `f32` — so agreement is a real cross-check, and
+    /// a convention drift in either would surface here.
+    #[test]
+    fn quaternion_backend_agrees_with_the_multivector_reference() {
+        let mut worst: f64 = 0.0;
+        for k in [1usize, 2, 5, 12] {
+            let axes: Vec<[f64; 3]> = (0..k)
+                .map(|i| {
+                    let t = i as f64;
+                    unit([
+                        (0.7 * t + 0.3).sin(),
+                        (1.1 * t + 0.9).cos(),
+                        (0.4 * t + 1.7).sin(),
+                    ])
+                })
+                .collect();
+            let chain = RotorChain::new(axes).expect("unit axes");
+            let angles: Vec<f64> = (0..k).map(|i| 0.11 + 0.29 * i as f64).collect();
+            let v = [0.3, -0.5, 0.8];
+            let g = [0.6, 0.2, -0.9];
+
+            let want = chain
+                .adjoint_with(&angles, v, g, Backend::Multivector)
+                .expect("multivector");
+            let got = chain
+                .adjoint_with(&angles, v, g, Backend::Quaternion)
+                .expect("quaternion");
+
+            for i in 0..k {
+                let d = (got.grad_angles[i] - want.grad_angles[i]).abs();
+                worst = worst.max(d);
+                assert!(
+                    d < 2e-5,
+                    "k={k} angle {i}: quaternion {} vs multivector {}",
+                    got.grad_angles[i],
+                    want.grad_angles[i]
+                );
+            }
+            for c in 0..3 {
+                assert!(
+                    (got.value[c] - want.value[c]).abs() < 2e-6,
+                    "value differs at {c}"
+                );
+                assert!(
+                    (got.grad_input[c] - want.grad_input[c]).abs() < 2e-5,
+                    "grad_input differs at {c}"
+                );
+            }
+        }
+        eprintln!("quaternion vs multivector adjoint: worst grad component error {worst:.3e}");
+    }
+
+    /// The quaternion backend must still be checked against something that is not
+    /// the crate: the closed form dw/dθ = ω × w at k = 1.
+    #[test]
+    fn quaternion_backend_matches_the_closed_form_at_one_link() {
+        let axis = unit([0.4, -0.7, 0.6]);
+        let chain = RotorChain::new(vec![axis]).expect("unit axis");
+        let v = [0.3, -0.5, 0.8];
+        let g = [1.0, 0.0, 0.0];
+        for &theta in &[0.0, 0.4, 1.7, -0.9] {
+            let out = chain
+                .adjoint_with(&[theta], v, g, Backend::Quaternion)
+                .expect("quaternion");
+            let w = out.value;
+            let closed = g[0] * (axis[1] * w[2] - axis[2] * w[1])
+                + g[1] * (axis[2] * w[0] - axis[0] * w[2])
+                + g[2] * (axis[0] * w[1] - axis[1] * w[0]);
+            assert!(
+                (out.grad_angles[0] - closed).abs() < 2e-6,
+                "θ={theta}: quaternion adjoint {} vs ω×w {closed}",
+                out.grad_angles[0]
+            );
+        }
+    }
+
+    /// `Backend::default()` must stay the exact reference, so an unannotated
+    /// caller never silently drops to `f32`.
+    #[test]
+    fn default_backend_is_the_exact_one() {
+        assert_eq!(Backend::default(), Backend::Multivector);
+        let chain = RotorChain::new(vec![[0.0, 0.0, 1.0]]).expect("unit axis");
+        let a = chain
+            .adjoint(&[0.7], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+            .expect("adjoint");
+        let b = chain
+            .adjoint_with(
+                &[0.7],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                Backend::Multivector,
+            )
+            .expect("explicit");
+        assert_eq!(a.grad_angles, b.grad_angles);
     }
 }

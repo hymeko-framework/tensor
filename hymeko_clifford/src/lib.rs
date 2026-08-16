@@ -37,4 +37,4 @@ pub use algebra::{
     Multivector, Signature, blade_product, canonical_reorder_sign, cayley_to_unit_quat,
     quat_conjugate, quat_mul, quat_rotate,
 };
-pub use autodiff::{Adjoint, ChainError, RotorChain};
+pub use autodiff::{Adjoint, Backend, ChainError, RotorChain};
