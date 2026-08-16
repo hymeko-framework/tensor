@@ -1,0 +1,13 @@
+[package]
+name = "hymeko_clifford"
+version = "0.1.0"
+edition = "2024"
+description = "Clifford-algebra autograd backend for G-SPHF over signed-incidence hypergraphs. Phase 1 — algebra foundation: dense Multivector<N>, signature, blade product with canonical reorder sign, exhaustive unit tests."
+license = "MIT OR Apache-2.0"
+
+# Design invariant (per docs/plans/plans_20260429/hymeko_clifford_plan.md):
+# this crate must NOT depend on hymeko_core. The dependency goes the
+# other way eventually.
+
+[lib]
+name = "hymeko_clifford"

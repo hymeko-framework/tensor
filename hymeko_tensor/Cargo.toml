@@ -1,0 +1,9 @@
+[package]
+name = "hymeko_tensor"
+version = "0.1.0"
+edition = "2021"
+description = "Tensor pillar: matrix-based Rényi information estimators + the streamed HyMeKo IR format (std-only, no deps)."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "hymeko_tensor"

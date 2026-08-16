@@ -1,0 +1,33 @@
+[package]
+name = "hymeko_graph"
+version = "0.1.0"
+edition = "2024"
+description = "Generic signed-graph cycle and walk enumeration with axiomatic pruning. Lifts the Rust DFS / color-coding / reservoir code out of hymeko_py and adds a pluggable pruner trait so cycle enumeration can structurally reject candidates that violate domain axioms (Friedler P-graph A1–A5, Cartwright–Harary balance, Davis weak balance, bipartite alternation, etc) BEFORE materialising them."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kyberszittya/hymeko_framework_rust"
+keywords = ["graph", "cycle", "signed-graph", "p-graph", "enumeration"]
+categories = ["algorithms", "data-structures"]
+
+[lib]
+name = "hymeko_graph"
+
+[dependencies]
+rayon = "1.10"
+dashmap = "6"
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.8.2"
+rand = "0.9"
+
+[[bench]]
+name = "graph_bench"
+harness = false
+
+[[bench]]
+name = "spine_bench"
+harness = false
+
+[[bench]]
+name = "incidence_bench"
+harness = false
