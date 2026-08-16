@@ -17,7 +17,13 @@
 //! - Unit tests covering anticommutativity, basis squares, and an
 //!   exhaustive sweep of `canonical_reorder_sign` for $N \leq 4$.
 //!
-//! Subsequent phases (geometric/outer/inner/scalar products, autograd
+//! ## Phase 2 (2026-08-16)
+//!
+//! - [`autodiff`]: reverse-mode (adjoint) gradients for rotor chains —
+//!   `O(k)` where a central difference is `O(k²)`. Plan and measurement in
+//!   `docs/plans/2026-08-16-rotor-adjoint/`.
+//!
+//! Subsequent phases (outer/inner/scalar products, a general autograd
 //! tape, G-SPHF Laplacian, gradient flow) populate the modules listed
 //! at `docs/plans/plans_20260429/hymeko_clifford_plan.md`.
 
@@ -25,8 +31,10 @@
 #![warn(missing_docs)]
 
 pub mod algebra;
+pub mod autodiff;
 
 pub use algebra::{
     Multivector, Signature, blade_product, canonical_reorder_sign, cayley_to_unit_quat,
     quat_conjugate, quat_mul, quat_rotate,
 };
+pub use autodiff::{Adjoint, ChainError, RotorChain};
