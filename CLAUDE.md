@@ -28,7 +28,7 @@ consumer.
 
 ## Known state (2026-08-19)
 
-`hymeko_graph` fails `cargo fmt --check` (223 diffs) and `cargo clippy -D warnings` (9 errors),
+`hymeko_graph` fails `cargo fmt --check` (219 diff hunks across 21 files) and `cargo clippy -D warnings` (12 errors),
 both pre-existing. Core status is about protection, not about being finished — but do not add to it.
 
 <!-- BEGIN SHARED CONTRACT — do not edit below this line in one repo only. -->
