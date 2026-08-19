@@ -18,7 +18,10 @@ use hymeko_spline::{
 struct Lcg(u64);
 impl Lcg {
     fn next_f32(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
     }
 }
@@ -58,7 +61,10 @@ fn catmull_rom_grad_coef_matches_central_differences() {
             .sum();
     }
     let e = max_rel_err(&analytic, &numeric);
-    assert!(e < 2e-2, "grad_coef max rel err {e:.4}\nanalytic {analytic:?}\nnumeric {numeric:?}");
+    assert!(
+        e < 2e-2,
+        "grad_coef max rel err {e:.4}\nanalytic {analytic:?}\nnumeric {numeric:?}"
+    );
 }
 
 #[test]

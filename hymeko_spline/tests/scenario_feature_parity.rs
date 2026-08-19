@@ -63,7 +63,11 @@ fn backward_bits_are_identical_across_feature_configurations() {
     let grad_y = pseudo_input(N * CHANNELS, 8);
     let (_, cache) = catmull_rom_forward(&coef, &x, N, CHANNELS, GRID);
     let bwd = catmull_rom_backward(&coef, &cache, &grad_y);
-    assert_eq!(bits_hash(&bwd.grad_coef), GOLDEN_GRAD_COEF, "grad_coef bits differ");
+    assert_eq!(
+        bits_hash(&bwd.grad_coef),
+        GOLDEN_GRAD_COEF,
+        "grad_coef bits differ"
+    );
     assert_eq!(bits_hash(&bwd.grad_x), GOLDEN_GRAD_X, "grad_x bits differ");
 }
 

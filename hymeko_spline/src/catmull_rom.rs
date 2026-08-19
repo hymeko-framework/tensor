@@ -71,7 +71,6 @@ fn use_parallel(elems: usize) -> bool {
     elems >= PAR_MIN_ELEMS && rayon::current_num_threads() > 1
 }
 
-
 /// Fixed number of row blocks the parallel paths split into.
 ///
 /// Deliberately a constant and **not** `rayon::current_num_threads()`: the

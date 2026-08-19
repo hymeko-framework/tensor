@@ -17,6 +17,12 @@
 /// If this test fails, `.cargo/config.toml` has been lost or overridden — restore it rather than
 /// deleting this test. On non-x86-64 targets the contract does not apply and the test is inert.
 #[test]
+// `assertions_on_constants`: intentional. `target_feature` is a compile-time cfg, so the assertion
+// IS constant — that is what makes this test cost nothing at runtime and catch the missing rustflag
+// at build time. Clippy suggests a `const {}` block; deliberately not taken, because that would make
+// the crate fail to COMPILE without the flag rather than fail a test, breaking baseline and
+// cross-target builds for people who are not chasing the KAN/HSiKAN hot path.
+#[allow(clippy::assertions_on_constants)]
 fn sse41_target_feature_is_enabled_on_x86_64() {
     #[cfg(target_arch = "x86_64")]
     assert!(
@@ -31,6 +37,7 @@ fn sse41_target_feature_is_enabled_on_x86_64() {
 
 /// Documents the non-x86-64 case explicitly so the contract's scope is not mistaken for universal.
 #[test]
+#[allow(clippy::assertions_on_constants)] // same rationale as the sibling test above
 fn contract_scope_is_x86_64_only() {
     if cfg!(target_arch = "x86_64") {
         assert!(cfg!(target_feature = "sse4.1"), "see the sibling test");
