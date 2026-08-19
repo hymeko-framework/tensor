@@ -1,0 +1,51 @@
+# CORE.YAML — the `tensor` repository IS the HyMeKo framework
+#
+# Scoped to paths inside this repository, so it is meaningful in a standalone clone. The
+# workspace-root copy (which is not in any git repo — the root is not a repository) lists the
+# same crates with workspace-relative paths; this one is authoritative for `tensor`.
+#
+# CONTRACT (CLAUDE.md §1): every item below is read-only by default. A task that requires
+# modifying one must STOP, produce a written justification and a migration plan, and wait for
+# explicit approval. A workaround in the consuming application is always preferred over a
+# "small" core edit. Adding, removing or upgrading a dependency is treated the same way.
+#
+# Established by the 2026-08-19 architecture audit
+# (`../nagare/reports/2026-08-19-architecture-audit.md` §B-bis) and the integration that followed
+# (`../nagare/reports/2026-08-19-framework-integration.md`).
+
+core:
+  # Algebra: rotors, multivectors, adjoint autodiff.
+  # The reference standard of the whole project: `forbid(unsafe_code)`, a 0.97:1 test-to-source
+  # ratio across six NAMED SCENARIO suites, the densest Design-by-Contract docs anywhere in the
+  # codebase, zero production `unwrap`/`expect`. Deliberately dependency-free — keep it that way.
+  - hymeko_clifford
+
+  # Spline activation kernels — on the measured hot path of every KAN and HSiKAN run.
+  # The only place in the project where the determinism contract is both STATED and ENFORCED:
+  # `catmull_rom.rs::{forward,backward}_is_byte_identical_across_thread_counts`, plus
+  # `tests/scenario_feature_parity.rs` for the `parallel` on/off half. `rayon` is optional by
+  # design so the crate is dependency-free with the feature off; do not make it mandatory.
+  - hymeko_spline
+
+  # Signed graphs, incidence, cycle enumeration.
+  # Core by role, but NOT currently clean: 223 `fmt` diffs and 9 `clippy` errors, all pre-existing
+  # as of 2026-08-19. Core status is about protection, not about being finished. Cleaning it is a
+  # separate, approved job — not something to fold into an unrelated change.
+  - hymeko_graph
+
+  # HyMeKoStream IR + matrix-based Rényi-2 estimators.
+  # Was an orphan (zero reverse dependencies) until 2026-08-19, while six of its `renyi.rs`
+  # functions sat copied inside `nagare/examples/nagare_deep_signed.rs`. Now linked by `nagare`,
+  # and the copies are retired. Keep it the single source of truth — do not re-copy from it.
+  - hymeko_tensor
+
+  # Build contract. `+sse4.1` makes `f32::floor` one `roundss` instead of a libm call in the
+  # spline forward: ~10% on KAN, ~5.6% on HSiKAN. This file was UNTRACKED until 2026-08-19 and
+  # its loss was undetectable; `hymeko_spline/tests/build_contract.rs` now fails loudly without it.
+  - .cargo/config.toml
+
+# Consumers. `nagare` links hymeko_clifford, hymeko_graph, hymeko_spline and hymeko_tensor by path.
+# A breaking change to any public API above is a breaking change to the application — check
+# `nagare` builds before proposing one.
+consumers:
+  - ../nagare
