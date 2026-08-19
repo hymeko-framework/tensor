@@ -37,8 +37,26 @@ ta=$(mktemp); tb=$(mktemp); trap 'rm -f "$ta" "$tb"' EXIT
 extract "$A" > "$ta" || exit 2
 extract "$B" > "$tb" || exit 2
 
+# The workspace-root CLAUDE.md is a THIRD copy: it is what Claude Code auto-loads for this
+# workspace, so it cannot be reduced to a pointer, and an unchecked third copy is exactly how the
+# contract goes stale. It has no markers — it IS the body — so compare it directly when present.
+ROOT="$HERE/../CLAUDE.md"
+root_status="absent (fine — the repo copies are authoritative)"
+if [[ -f "$ROOT" ]]; then
+  if diff -q "$ROOT" "$ta" >/dev/null 2>&1; then
+    root_status="in sync"
+  else
+    root_status="STALE"
+  fi
+fi
+
 if diff -q "$ta" "$tb" >/dev/null; then
   echo "contract sync OK — shared body identical ($(wc -l < "$ta") lines, sha $(sha256sum < "$ta" | cut -c1-16))"
+  echo "  workspace-root CLAUDE.md: $root_status"
+  [[ "$root_status" == "STALE" ]] && {
+    echo "  the root copy is what the agent auto-loads — re-sync it from either repo's shared body" >&2
+    exit 1
+  }
   exit 0
 fi
 

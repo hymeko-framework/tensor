@@ -137,11 +137,27 @@ For any non-trivial implementation, experiment, architecture change, or
 core-adjacent change, produce a **plan document** before writing code. A
 single-file local fix, typo, formatting-only change, read-only investigation, or
 small forensic classification does not require the full plan bundle unless it can
-change research conclusions or persistent artifacts. Commit plans to:
+change research conclusions or persistent artifacts. Write plans to:
 
 ```
 docs/plans/<YYYY-MM-DD>-<slug>/
 ```
+
+**Plans are NOT version-controlled — the NFS archive is their canonical store**
+(policy set 2026-08-19). `.gitignore` excludes `/docs/plans/`, so a plan written
+only into the working tree exists in exactly one place; on 2026-08-19, 9 of 17
+plan directories and **both signed datasets** were in that state, the latter being
+bytes the paper identifies by md5 with no second copy anywhere. Push them with:
+
+```
+scripts/sync_artifacts.sh          # push + verify
+scripts/sync_artifacts.sh --check  # report drift, copy nothing
+```
+
+It is additive by construction and never deletes: the archive is a superset of any
+checkout (421 plan directories against 17 local). The same script carries the other
+gitignored-but-required classes — `data/signed/`, `data/slam/`. **Git stays
+canonical for code and reports; the NFS archive is canonical for plans and data.**
 
 The plan must be produced in **all four** formats:
 
