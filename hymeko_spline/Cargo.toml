@@ -1,0 +1,21 @@
+[package]
+name = "hymeko_spline"
+version = "0.1.0"
+edition = "2021"
+description = "Spline activation kernels — Catmull-Rom, Chebyshev-CR, Kochanek-Bartels — on flat f32 slices."
+
+[lib]
+name = "hymeko_spline"
+path = "src/lib.rs"
+
+[dependencies]
+# Optional by design. `hymeko_tensor` and `hymeko_clifford` are dependency-free
+# and stay that way; this crate exists so the splines can have rayon without
+# forcing it on them. With `parallel` off the crate is also dependency-free and
+# every kernel takes its sequential path — which produces *identical bytes*, see
+# the module docs.
+rayon = { version = "1.10", optional = true }
+
+[features]
+default = []
+parallel = ["dep:rayon"]
