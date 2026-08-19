@@ -28,7 +28,7 @@ core:
   - hymeko_spline
 
   # Signed graphs, incidence, cycle enumeration.
-  # Core by role, but NOT currently clean: 223 `fmt` diffs and 9 `clippy` errors, all pre-existing
+  # Core by role, but NOT currently clean: 219 `fmt` diff hunks across 21 files, and 12 `clippy` errors, all pre-existing
   # as of 2026-08-19. Core status is about protection, not about being finished. Cleaning it is a
   # separate, approved job — not something to fold into an unrelated change.
   - hymeko_graph
