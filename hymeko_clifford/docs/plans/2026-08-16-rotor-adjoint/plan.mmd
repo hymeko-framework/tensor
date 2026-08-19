@@ -1,0 +1,25 @@
+%% Reverse-mode (adjoint) sweep for a rotor chain — hymeko_clifford Phase 2.
+flowchart LR
+    subgraph FWD["forward sweep — O(k), store every x_i"]
+        direction LR
+        V["x0 = v"] --> R1["R1 · x0 · R1~"] --> X1["x1"]
+        X1 --> R2["R2 · x1 · R2~"] --> X2["x2"]
+        X2 -.-> RK["Rk · x_{k-1} · Rk~"] --> W["xk = w"]
+    end
+
+    W --> SEED["seed a_k = dL/dw"]
+
+    subgraph BWD["backward sweep — O(k), one pass"]
+        direction RL
+        AK["a_k"] --> GK["dL/dtheta_k = a_k . (w_k x x_k)"]
+        AK --> PK["a_{k-1} = Rk~ · a_k · Rk"]
+        PK -.-> A1["a_1"]
+        A1 --> G1["dL/dtheta_1 = a_1 . (w_1 x x_1)"]
+        A1 --> A0["a_0 = dL/dv (free)"]
+    end
+
+    SEED --> AK
+
+    FDNOTE["central difference:<br/>2k forward sweeps<br/>= 2k² rotor applications<br/>O(k²)"]
+    ADNOTE["adjoint:<br/>1 forward + 1 backward<br/>= 2k rotor applications<br/>O(k)"]
+    FDNOTE -.compare.- ADNOTE

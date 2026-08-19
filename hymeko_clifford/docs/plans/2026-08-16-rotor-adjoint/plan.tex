@@ -1,0 +1,164 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,hyperref,listings,xcolor}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single,
+        backgroundcolor=\color{gray!8}}
+\title{\textbf{Plan --- Phase 2: reverse-mode (adjoint) gradients for rotor chains}\\
+       \texttt{hymeko\_clifford::autodiff}}
+\author{Aiko Seto}
+\date{Created-at: 2026-08-16 20:55 CEST}
+
+\begin{document}
+\maketitle
+
+\section*{ETA}
+$\approx$50 min: 20 min module + contracts, 15 min tests (adjoint vs finite
+difference vs closed form, operation counts), 10 min benchmark + measurement
+against the recorded $O(k^2)$ baseline, 5 min report. Basis: the mathematics is a
+two-sweep recurrence with a known closed form; the correctness harness
+(\texttt{tests/scenario\_derivative.rs}) and the cost baseline
+(\texttt{clifford/derivative/*}) both already exist, measured 2026-08-16.
+
+\section{Scope}
+\texttt{hymeko\_clifford} is documented as the ``Clifford-algebra autograd
+backend for G-SPHF''; Phase 1 shipped no gradients. Measured consequence
+(\texttt{reports/2026-08-16-nagare-cpu-memory-benchmark.md} \S6h): a
+central-difference gradient over a $k$-angle rotor chain costs $2k$ forward
+evaluations, i.e.\ $O(k^2)$ --- $63.9\times$ the forward pass at $k=32$.
+
+This plan adds the reverse sweep, which is $O(k)$.
+
+\textbf{Not in scope:} a general autograd tape over arbitrary multivector
+expressions. The rotor chain is the shape that is measured, benchmarked, and
+used; a tape is a larger decision and should follow evidence from this one.
+
+\section{Mathematics}
+With $x_0 = v$, $x_i = R_i x_{i-1} \tilde R_i$, $w = x_k$, and rotors
+$R_i = \exp(-\tfrac{\theta_i}{2} B_i)$ about unit axes $\omega_i$:
+\[
+  \frac{\partial x_i}{\partial \theta_i} = \omega_i \times x_i,
+  \qquad
+  \frac{\partial x_i}{\partial x_{i-1}} = R_i(\cdot)\tilde R_i .
+\]
+Seeding the adjoint with $\bar a_k = \partial L/\partial w$, the reverse
+recurrence is
+\[
+  \frac{\partial L}{\partial \theta_i} = \bar a_i \cdot (\omega_i \times x_i),
+  \qquad
+  \bar a_{i-1} = \tilde R_i\, \bar a_i\, R_i ,
+\]
+and $\bar a_0 = \partial L/\partial v$ falls out for free. One forward sweep
+storing $x_0 \dots x_k$, one backward sweep: $2k$ rotor applications and $k$ cross
+products, \textbf{$O(k)$ in both time and memory}, against $2k^2$ rotor
+applications for the central difference (already asserted by counter in
+\texttt{gradient\_of\_a\_chain\_costs\_two\_evaluations\_per\_angle}).
+
+\section{Affected files}
+\begin{itemize}
+  \item \texttt{src/autodiff.rs} --- new module: \texttt{RotorChain},
+        \texttt{Adjoint}, \texttt{ChainError}.
+  \item \texttt{src/lib.rs} --- declare and re-export; the Phase-1 doc comment
+        updated so it no longer claims gradients are absent.
+  \item \texttt{tests/scenario\_adjoint.rs} --- new scenario tests.
+  \item \texttt{../../nagare/benches/clifford\_algebra\_bench.rs} --- adjoint arm
+        beside the existing finite-difference sweep, same shapes.
+  \item Mirror every source change to
+        \texttt{nagare/vendor/hymeko\_clifford/}, which is byte-identical today
+        and must stay so.
+\end{itemize}
+
+\section{CORE.YAML items touched}
+\textbf{None} --- \texttt{CORE.YAML} does not exist in this workspace (flagged
+2026-08-16). \textbf{No dependency added}: the module is \texttt{std}-only, like
+the rest of the crate.
+
+\section{Interface}
+\begin{lstlisting}[language=Rust]
+pub struct RotorChain { /* axes: Vec<[f64; 3]> */ }
+pub struct Adjoint { pub value: [f64; 3],
+                     pub grad_angles: Vec<f64>,
+                     pub grad_input: [f64; 3] }
+pub enum ChainError { NonUnitAxis { index, norm }, AngleCount { expected, got } }
+
+impl RotorChain {
+    pub fn new(axes: Vec<[f64; 3]>) -> Result<Self, ChainError>;
+    pub fn apply(&self, angles: &[f64], v: [f64; 3]) -> Result<[f64; 3], ChainError>;
+    pub fn adjoint(&self, angles: &[f64], v: [f64; 3],
+                   grad_out: [f64; 3]) -> Result<Adjoint, ChainError>;
+    pub fn finite_difference_gradient(&self, angles: &[f64], v: [f64; 3],
+                                      grad_out: [f64; 3], h: f64)
+        -> Result<Vec<f64>, ChainError>;
+}
+\end{lstlisting}
+
+\texttt{Result} rather than panics: axis normalisation and angle-count are
+caller errors, and \S6.4 forbids swallowing them. The finite difference ships
+\emph{in the library} deliberately --- it is the reference a caller uses to
+gradient-check its own objective, and keeping it beside the adjoint means the
+two cannot drift apart unnoticed.
+
+\section{Test strategy}
+\begin{description}
+  \item[Unit] adjoint vs the closed form $\omega \times w$ at $k=1$; error type
+        surfaces a non-unit axis and an angle-count mismatch.
+  \item[Scenario] adjoint vs central difference over $k \in \{1,2,4,8,16\}$,
+        random axes and seeds; \texttt{grad\_input} checked against a finite
+        difference in $v$; gradient of a closed loop is zero where the loop is
+        the identity.
+  \item[Cost] operation counters assert $2k$ rotor applications for the adjoint
+        against $2k^2$ for the difference --- the $O(k)$ claim machine-checked,
+        not left to the clock.
+  \item[Regression] the adjoint did not exist, so every test is new; the
+        finite-difference reference is the oracle.
+\end{description}
+
+\section{Performance budget}
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Metric ($k=32$, measured 2026-08-16) & Finite difference & Target (adjoint) \\
+\midrule
+gradient / forward ratio & $63.9\times$ & $\le 4\times$ \\
+absolute gradient cost   & 51.42\,\textmu s & $\le 4$\,\textmu s \\
+growth per doubling of $k$ & $\approx 4\times$ & $\approx 2\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Targets follow from the operation counts, not from optimism: the adjoint does
+$2k$ rotor applications where the difference does $2k^2$. If the measurement
+lands outside, the implementation is wrong or the constant is dominated by
+allocation --- both are findings, not excuses.
+
+\section{Rollback}
+Purely additive: a new module, new tests, a new benchmark arm. Deleting
+\texttt{src/autodiff.rs} and its \texttt{pub mod} line restores the crate exactly.
+No existing signature changes, no data or fixture is mutated.
+
+\section{Risk anticipation}
+\begin{itemize}
+  \item \textbf{Worst-case input}: long chains ($k$ up to $32$ benchmarked, no
+        upper bound in the API), angles near $\pi$ where a Cayley
+        parameterisation would diverge --- avoided by parameterising the rotor
+        directly as $\cos(\theta/2) + \sin(\theta/2) B$ rather than through
+        \texttt{cayley\_to\_unit\_quat}.
+  \item \textbf{Precision}: the reference finite difference in \texttt{f64} is
+        second-order accurate (verified: halving $h$ cuts error $4.00\times$).
+        The pre-existing benchmark differences the \texttt{f32} quaternion path
+        with $h=10^{-5}$, which sits near the cancellation limit for
+        \texttt{f32}; that is a flaw in the \emph{baseline benchmark}, recorded
+        in the report, and the reason this module and its comparison are
+        \texttt{f64} throughout.
+  \item \textbf{Contract preservation}: the crate is \texttt{\#![forbid(unsafe\_code)]}
+        and \texttt{\#![warn(missing\_docs)]}; the new module inherits both, so
+        every public item carries preconditions and postconditions.
+  \item \textbf{Duplication}: two copies of the crate exist. Both are patched and
+        re-checked with \texttt{diff -rq}, as for the \texttt{GradRequest} fix.
+\end{itemize}
+
+\section{Known deviation}
+\textbf{\texttt{plan.pdf} cannot be produced}: no TeX toolchain on this host, and
+installing one is a \S1 dependency change. Per \S11 this is a halt condition; it
+is recorded and reported rather than skipped. The \texttt{.tex}, \texttt{.tikz}
+and \texttt{.mmd} sources are complete.
+
+\end{document}
