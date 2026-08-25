@@ -38,6 +38,7 @@
 //! thread to 133.3 ms at 18 — a 6x regression from splitting 120 rows across
 //! workers. Small shapes must stay sequential.
 
+use crate::clamp_contract::ClampGradientContract;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -110,6 +111,16 @@ fn block_stride(n: usize, channels: usize) -> usize {
 pub struct CatmullRomCache {
     /// Clamped input values, flat `(n, channels)`.
     pub x_clamped: Vec<f32>,
+    /// Whether each raw input lay **inside the closed interval** `[-1, 1]`, flat `(n, channels)`.
+    ///
+    /// The forward clamps, so `x_clamped` cannot answer this: it is always inside by
+    /// construction. Recording the fact here is what lets the backward apply the clamp's own
+    /// Jacobian — the information the pre-2026-08-25 implementation destroyed. `bool` rather than
+    /// the raw `x`: one byte instead of four, and it is exactly the predicate the guard needs.
+    ///
+    /// The interval is **closed**, so `x == ±1` is interior and keeps the interior derivative the
+    /// historical implementation gave it.
+    pub interior: Vec<bool>,
     /// Segment index per input element.
     ///
     /// `u8`, not `usize`: the value is a CR segment index bounded by `grid - 2`,
@@ -152,6 +163,7 @@ pub struct ChebyshevCrBackward {
 struct ForwardRow<'a> {
     out: &'a mut [f32],
     x_clamped: &'a mut [f32],
+    interior: &'a mut [bool],
     indices: &'a mut [u8],
     t: &'a mut [f32],
 }
@@ -173,7 +185,8 @@ fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w:
         let base_e = row * channels;
         for ch in 0..channels {
             let e = base_e + ch;
-            let xc = x_block[e].clamp(-1.0, 1.0);
+            let raw = x_block[e];
+            let xc = raw.clamp(-1.0, 1.0);
             let u = (xc + 1.0) * span;
             let i = (u.floor() as usize).min(grid - 2);
             let t = u - i as f32;
@@ -185,6 +198,8 @@ fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w:
                 + weights[2] * coef[base + control[2]]
                 + weights[3] * coef[base + control[3]];
             w.x_clamped[e] = xc;
+            // Closed interval: `±1` is interior, matching the guard this replaces.
+            w.interior[e] = (-1.0..=1.0).contains(&raw);
             w.indices[e] = i as u8;
             w.t[e] = t;
         }
@@ -222,6 +237,7 @@ pub fn catmull_rom_forward(
 
     let mut out = vec![0.0; x.len()];
     let mut x_clamped = vec![0.0; x.len()];
+    let mut interior = vec![false; x.len()];
     let mut indices = vec![0u8; x.len()];
     let mut ts = vec![0.0; x.len()];
 
@@ -233,10 +249,11 @@ pub fn catmull_rom_forward(
         let stride = block_stride(n, channels);
         out.par_chunks_mut(stride)
             .zip(x_clamped.par_chunks_mut(stride))
+            .zip(interior.par_chunks_mut(stride))
             .zip(indices.par_chunks_mut(stride))
             .zip(ts.par_chunks_mut(stride))
             .zip(x.par_chunks(stride))
-            .for_each(|((((out_b, xc_b), idx_b), t_b), x_b)| {
+            .for_each(|(((((out_b, xc_b), in_b), idx_b), t_b), x_b)| {
                 forward_block(
                     coef,
                     grid,
@@ -245,6 +262,7 @@ pub fn catmull_rom_forward(
                     ForwardRow {
                         out: out_b,
                         x_clamped: xc_b,
+                        interior: in_b,
                         indices: idx_b,
                         t: t_b,
                     },
@@ -259,6 +277,7 @@ pub fn catmull_rom_forward(
             ForwardRow {
                 out: &mut out,
                 x_clamped: &mut x_clamped,
+                interior: &mut interior,
                 indices: &mut indices,
                 t: &mut ts,
             },
@@ -274,6 +293,7 @@ pub fn catmull_rom_forward(
         ForwardRow {
             out: &mut out,
             x_clamped: &mut x_clamped,
+            interior: &mut interior,
             indices: &mut indices,
             t: &mut ts,
         },
@@ -283,6 +303,7 @@ pub fn catmull_rom_forward(
         out,
         CatmullRomCache {
             x_clamped,
+            interior,
             indices,
             t: ts,
             n,
@@ -300,7 +321,7 @@ pub fn catmull_rom_forward(
 type BackwardZip<'a> = (
     (
         (((&'a mut [f32], &'a [f32]), &'a [u8]), &'a [f32]),
-        &'a [f32],
+        &'a [bool],
     ),
     &'a mut [f32],
 );
@@ -315,7 +336,8 @@ struct BackwardChunk<'a> {
     grad_y: &'a [f32],
     indices: &'a [u8],
     t: &'a [f32],
-    x_clamped: &'a [f32],
+    /// Per-element interior mask from the forward; see [`CatmullRomCache::interior`].
+    interior: &'a [bool],
 }
 
 /// Accumulate one contiguous chunk of rows into `grad_x` and `grad_coef`.
@@ -335,6 +357,7 @@ fn backward_chunk(
     grid: usize,
     c: BackwardChunk<'_>,
     grad_coef: &mut [f32],
+    contract: ClampGradientContract,
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
     let du_dx = 0.5 * (grid - 1) as f32;
@@ -352,7 +375,10 @@ fn backward_chunk(
             for k in 0..4 {
                 grad_coef[base + control[k]] += gy * weights[k];
             }
-            if (-1.0..=1.0).contains(&c.x_clamped[e]) {
+            // The clamp's own Jacobian: `1` inside the closed interval, `0` outside. Read from
+            // the recorded `interior` mask, not from `x_clamped` — the latter is always inside by
+            // construction, which is what made this guard a tautology before 2026-08-25.
+            if contract.propagates_input_gradient(c.interior[e]) {
                 let dweights = cr_weight_derivatives(t);
                 let mut dy_dt = 0.0;
                 for k in 0..4 {
@@ -376,6 +402,24 @@ pub fn catmull_rom_backward(
     coef: &[f32],
     cache: &CatmullRomCache,
     grad_y: &[f32],
+) -> CatmullRomBackward {
+    catmull_rom_backward_under(coef, cache, grad_y, ClampGradientContract::Corrected)
+}
+
+/// [`catmull_rom_backward`] under an explicitly named [`ClampGradientContract`].
+///
+/// # Preconditions
+/// As [`catmull_rom_backward`].
+///
+/// # Postconditions
+/// Under [`ClampGradientContract::LegacyRecorded`] the input gradient is **exactly zero** wherever the
+/// forward saturated. Under [`ClampGradientContract::LegacyRecorded`] it reproduces the
+/// pre-2026-08-25 arithmetic bit-for-bit. `grad_coef` is **identical under both**.
+pub fn catmull_rom_backward_under(
+    coef: &[f32],
+    cache: &CatmullRomCache,
+    grad_y: &[f32],
+    contract: ClampGradientContract,
 ) -> CatmullRomBackward {
     assert_eq!(grad_y.len(), cache.n * cache.channels);
     assert_eq!(coef.len(), cache.channels * cache.grid);
@@ -402,7 +446,7 @@ pub fn catmull_rom_backward(
     let blocks = grad_x.len().div_ceil(stride).max(1);
     let mut partials = vec![0.0f32; blocks * coef.len()];
 
-    let kernel = |(((((gx, gy), indices), t), x_clamped), local): BackwardZip<'_>| {
+    let kernel = |(((((gx, gy), indices), t), interior), local): BackwardZip<'_>| {
         backward_chunk(
             coef,
             cache.channels,
@@ -412,9 +456,10 @@ pub fn catmull_rom_backward(
                 grad_y: gy,
                 indices,
                 t,
-                x_clamped,
+                interior,
             },
             local,
+            contract,
         );
     };
 
@@ -425,7 +470,7 @@ pub fn catmull_rom_backward(
             .zip(grad_y.par_chunks(stride))
             .zip(cache.indices.par_chunks(stride))
             .zip(cache.t.par_chunks(stride))
-            .zip(cache.x_clamped.par_chunks(stride))
+            .zip(cache.interior.par_chunks(stride))
             .zip(partials.par_chunks_mut(coef.len()))
             .for_each(kernel);
     } else {
@@ -434,7 +479,7 @@ pub fn catmull_rom_backward(
             .zip(grad_y.chunks(stride))
             .zip(cache.indices.chunks(stride))
             .zip(cache.t.chunks(stride))
-            .zip(cache.x_clamped.chunks(stride))
+            .zip(cache.interior.chunks(stride))
             .zip(partials.chunks_mut(coef.len()))
             .for_each(kernel);
     }
@@ -445,7 +490,7 @@ pub fn catmull_rom_backward(
         .zip(grad_y.chunks(stride))
         .zip(cache.indices.chunks(stride))
         .zip(cache.t.chunks(stride))
-        .zip(cache.x_clamped.chunks(stride))
+        .zip(cache.interior.chunks(stride))
         .zip(partials.chunks_mut(coef.len()))
         .for_each(kernel);
 
@@ -524,7 +569,29 @@ pub fn chebyshev_cr_backward(
     grad_y: &[f32],
     k: usize,
 ) -> ChebyshevCrBackward {
-    let cr = catmull_rom_backward(control_points, cache, grad_y);
+    chebyshev_cr_backward_under(
+        control_points,
+        basis,
+        cache,
+        grad_y,
+        k,
+        ClampGradientContract::Corrected,
+    )
+}
+
+/// [`chebyshev_cr_backward`] under an explicitly named [`ClampGradientContract`].
+///
+/// The contract reaches `grad_x` only; the Chebyshev coefficient gradient is projected from
+/// `grad_coef`, which is identical under both contracts.
+pub fn chebyshev_cr_backward_under(
+    control_points: &[f32],
+    basis: &[f32],
+    cache: &CatmullRomCache,
+    grad_y: &[f32],
+    k: usize,
+    contract: ClampGradientContract,
+) -> ChebyshevCrBackward {
+    let cr = catmull_rom_backward_under(control_points, cache, grad_y, contract);
     let mut grad_coef = vec![0.0; cache.channels * k];
     for ch in 0..cache.channels {
         for term in 0..k {
@@ -772,10 +839,16 @@ mod tests {
     }
 
     /// Independent sequential reference for the backward.
+    /// Straightforward mirror of the blocked kernel, under an explicit contract.
+    ///
+    /// Updated 2026-08-25 with the clamp-Jacobian fix: it now reads the recorded `interior` mask,
+    /// exactly as the kernel does. This is the test's own reference implementation of the same
+    /// mathematics, not a recorded artifact — it has to mirror whichever contract it is asked for.
     fn naive_backward(
         coef: &[f32],
         cache: &CatmullRomCache,
         grad_y: &[f32],
+        contract: ClampGradientContract,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut grad_x = vec![0.0f32; grad_y.len()];
         let mut grad_coef = vec![0.0f32; coef.len()];
@@ -791,7 +864,7 @@ mod tests {
                 for k in 0..4 {
                     grad_coef[base + control[k]] += gy * w[k];
                 }
-                if (-1.0..=1.0).contains(&cache.x_clamped[e]) {
+                if contract.propagates_input_gradient(cache.interior[e]) {
                     let mut dy_dt = 0.0;
                     for k in 0..4 {
                         dy_dt += dw[k] * coef[base + control[k]];
@@ -835,9 +908,30 @@ mod tests {
             let grad_y = pseudo_input(n * channels, 5);
             let (_, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
             let got = catmull_rom_backward(&coef, &cache, &grad_y);
-            let (want_gx, want_gc) = naive_backward(&coef, &cache, &grad_y);
+            // `catmull_rom_backward` is the DEFAULT entry point, so its reference is `Corrected`.
+            let (want_gx, want_gc) =
+                naive_backward(&coef, &cache, &grad_y, ClampGradientContract::Corrected);
 
             assert_eq!(got.grad_x, want_gx, "n={n}: grad_x must be bit-exact");
+
+            // The blocked kernel must mirror the naive one under BOTH contracts, so the
+            // parallel/sequential equivalence is not proven for the default only.
+            let legacy = catmull_rom_backward_under(
+                &coef,
+                &cache,
+                &grad_y,
+                ClampGradientContract::LegacyRecorded,
+            );
+            let (legacy_gx, _) = naive_backward(
+                &coef,
+                &cache,
+                &grad_y,
+                ClampGradientContract::LegacyRecorded,
+            );
+            assert_eq!(
+                legacy.grad_x, legacy_gx,
+                "n={n}: legacy grad_x must be bit-exact"
+            );
 
             // Relative to the magnitude actually accumulated, not to 1.0 — the sum
             // grows with n, so an absolute tolerance would silently loosen.

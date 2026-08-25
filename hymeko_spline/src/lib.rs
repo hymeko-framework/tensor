@@ -39,12 +39,16 @@
 
 /// Catmull-Rom and Chebyshev-CR kernels on flat row-major `f32` slices.
 pub mod catmull_rom;
+/// Which clamp Jacobian a spline backward applies to its input gradient.
+pub mod clamp_contract;
 /// Kochanek-Bartels (TCB) spline kernels.
 pub mod kochanek_bartels;
 
 pub use catmull_rom::{
-    catmull_rom_backward, catmull_rom_forward, chebyshev_control_points, chebyshev_cr_backward,
+    catmull_rom_backward, catmull_rom_backward_under, catmull_rom_forward,
+    chebyshev_control_points, chebyshev_cr_backward, chebyshev_cr_backward_under,
     chebyshev_cr_forward, chebyshev_deploy_backward, chebyshev_deploy_forward,
     chebyshev_knot_basis, CatmullRomBackward, CatmullRomCache, ChebyshevCrBackward, PAR_MIN_ELEMS,
 };
-pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};
+pub use clamp_contract::ClampGradientContract;
+pub use kochanek_bartels::{kb_backward, kb_backward_under, kb_forward, KbBackward, KbCache};
