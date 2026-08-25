@@ -105,6 +105,110 @@ pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+// ---------------------------------------------------------------------------------------------
+// Rotor holonomy — the ordered running rotor product over a cycle.
+//
+// Moved here from `nagare/src/ops/rotor_holonomy.rs` on 2026-08-25. It is general rotor algebra:
+// an ordered product of unit quaternions and its adjoint, carrying no signed-link, dataset or
+// model concept, so `hymeko_clifford` owns it and Nagare re-exports it.
+//
+// The arithmetic is unchanged. It now calls this crate's `quat_mul` / `quat_conjugate`, which
+// `tests/quat_primitive_bit_identity.rs` proves bit-identical to the retired `qmul` / `qconj`
+// expressions over a deterministic finite sweep including signed zeros.
+// ---------------------------------------------------------------------------------------------
+
+/// The identity rotor.
+const IDENT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+
+/// Read quaternion `i` out of a flat 4-strided buffer.
+#[inline]
+fn q_at(buf: &[f32], i: usize) -> [f32; 4] {
+    [buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]]
+}
+
+/// Rotor-holonomy forward: ordered quaternion product per cycle.
+///
+/// # Preconditions
+/// `edge_quats.len() == n_cycles * k * 4`, `k >= 1`.
+///
+/// # Postconditions
+/// Returns `(holo, prefixes)` with `holo.len() == n_cycles * 4` (the holonomy per cycle) and
+/// `prefixes.len() == n_cycles * k * 4` (the saved prefix products `P_0 … P_{k-1}`).
+///
+/// # Finite-input contract
+/// Every element of `edge_quats` must be finite. `quat_mul` asserts this, so a non-finite
+/// input panics rather than silently propagating a `NaN` — a deliberate tightening over the
+/// retired Nagare expressions, certified separately from the finite-domain bit-identity.
+///
+/// # Panics
+/// If `edge_quats.len() != n_cycles * k * 4` or `k == 0`.
+pub fn rotor_holonomy_forward(
+    edge_quats: &[f32],
+    n_cycles: usize,
+    k: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    assert!(k >= 1);
+    assert_eq!(edge_quats.len(), n_cycles * k * 4);
+    let mut holo = vec![0.0f32; n_cycles * 4];
+    let mut prefixes = vec![0.0f32; n_cycles * k * 4];
+    for c in 0..n_cycles {
+        let base = c * k * 4;
+        let mut p = q_at(edge_quats, c * k); // P_0 = q_0
+        prefixes[base..base + 4].copy_from_slice(&p);
+        for i in 1..k {
+            p = quat_mul(q_at(edge_quats, c * k + i), p); // P_i = q_i · P_{i-1}
+            prefixes[base + i * 4..base + i * 4 + 4].copy_from_slice(&p);
+        }
+        holo[c * 4..c * 4 + 4].copy_from_slice(&p);
+    }
+    (holo, prefixes)
+}
+
+/// Rotor-holonomy backward. Given `grad_holo = ∂L/∂H`, returns `∂L/∂edge_quats`.
+///
+/// # Preconditions
+/// `edge_quats.len() == prefixes.len() == n_cycles * k * 4`, `grad_holo.len() == n_cycles * 4`, `k >= 1`.
+///
+/// # Finite-input contract
+/// Every element of `edge_quats` must be finite. `quat_mul` asserts this, so a non-finite
+/// input panics rather than silently propagating a `NaN` — a deliberate tightening over the
+/// retired Nagare expressions, certified separately from the finite-domain bit-identity.
+///
+/// # Panics
+/// If the length preconditions do not hold.
+pub fn rotor_holonomy_backward(
+    edge_quats: &[f32],
+    prefixes: &[f32],
+    grad_holo: &[f32],
+    n_cycles: usize,
+    k: usize,
+) -> Vec<f32> {
+    assert!(k >= 1);
+    assert_eq!(edge_quats.len(), n_cycles * k * 4);
+    assert_eq!(prefixes.len(), n_cycles * k * 4);
+    assert_eq!(grad_holo.len(), n_cycles * 4);
+    let mut grad = vec![0.0f32; n_cycles * k * 4];
+    for c in 0..n_cycles {
+        let base = c * k * 4;
+        let grad_h = q_at(grad_holo, c);
+        let mut suffix = IDENT; // S_{k-1} = 1
+        for i in (0..k).rev() {
+            let p_prev = if i == 0 {
+                IDENT
+            } else {
+                q_at(prefixes, c * k + i - 1)
+            };
+            let gqi = quat_mul(
+                quat_mul(quat_conjugate(suffix), grad_h),
+                quat_conjugate(p_prev),
+            );
+            grad[base + i * 4..base + i * 4 + 4].copy_from_slice(&gqi);
+            suffix = quat_mul(suffix, q_at(edge_quats, c * k + i)); // S_{i-1} = S_i · q_i
+        }
+    }
+    grad
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
