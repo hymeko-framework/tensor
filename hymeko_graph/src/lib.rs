@@ -73,6 +73,7 @@ pub mod community;
 pub mod cycle_enum;
 pub mod cycle_sampler;
 pub mod friedler;
+pub mod hyper_operator;
 pub mod incidence;
 pub mod path_closure;
 pub mod pruner;
@@ -91,6 +92,7 @@ pub mod walks_unsigned;
 pub use balance::{BipartiteOnlyPruner, CartwrightHararyPruner, DavisWeakBalancePruner};
 pub use cycle_enum::{enumerate_simple_cycles, enumerate_simple_cycles_noprune};
 pub use friedler::FriedlerAxiomPruner;
+pub use hyper_operator::{HyperIncidenceError, SignedHyperIncidence};
 pub use incidence::{
     BuildOpts as IncidenceBuildOpts, IncidenceCoo, IncidenceOutput, IncidenceResult,
     build_edge_incidence, build_edge_incidence_vertex_adj,
