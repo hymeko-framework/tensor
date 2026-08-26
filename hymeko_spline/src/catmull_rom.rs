@@ -176,7 +176,7 @@ struct ForwardRow<'a> {
 ///
 /// # Preconditions
 /// Every slice in `w` has the same length as `x_block`, which is a whole multiple
-/// of `channels`; `coef.len() == channels * grid`; `grid >= 4`.
+/// of `channels`; `coef.len() == channels * grid`; `grid >= 3`.
 #[inline(always)]
 fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w: ForwardRow<'_>) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
@@ -209,7 +209,7 @@ fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w:
 /// Forward Catmull--Rom activation.
 ///
 /// # Preconditions
-/// - `grid >= 4`
+/// - `grid >= 3`
 /// - `x.len() == n * channels`
 /// - `coef.len() == channels * grid`
 ///
@@ -223,11 +223,19 @@ pub fn catmull_rom_forward(
     channels: usize,
     grid: usize,
 ) -> (Vec<f32>, CatmullRomCache) {
-    assert!(grid >= 4);
+    // Three is the smallest grid this operator **supports**: `i` ranges over `{0, 1}`, giving two
+    // segments, and the outer stencil points are supplied by the endpoint replication
+    // `cr_control_indices` already performs. The CogInfoCom HSiKAN configuration uses grid 3, which
+    // is why the minimum moved from 4. Grid 2 is out of contract here — not asserted to be
+    // mathematically impossible, simply not a configuration this operator is certified for.
+    assert!(
+        grid >= 3,
+        "Catmull--Rom needs at least 3 control points, got {grid}"
+    );
     // `indices` is `u8`. The stored value is `min(floor(u), grid - 2)`, so it fits
-    // exactly when `grid - 2 <= u8::MAX`. Every grid in this codebase is 5-6; this
-    // is the guard that turns a silent wraparound into a failed precondition if
-    // that ever stops being true.
+    // exactly when `grid - 2 <= u8::MAX`. Grids in this codebase run 3-6, so the stored
+    // value is at most 4; this is the guard that turns a silent wraparound into a failed
+    // precondition if that ever stops being true.
     assert!(
         grid - 2 <= u8::MAX as usize,
         "grid {grid} exceeds the u8 segment-index range; widen CatmullRomCache::indices"
@@ -412,9 +420,11 @@ pub fn catmull_rom_backward(
 /// As [`catmull_rom_backward`].
 ///
 /// # Postconditions
-/// Under [`ClampGradientContract::LegacyRecorded`] the input gradient is **exactly zero** wherever the
-/// forward saturated. Under [`ClampGradientContract::LegacyRecorded`] it reproduces the
-/// pre-2026-08-25 arithmetic bit-for-bit. `grad_coef` is **identical under both**.
+/// Under [`ClampGradientContract::Corrected`] the input gradient is **exactly zero** wherever the
+/// forward saturated — the clamp has zero derivative outside `[-1, 1]`. Under
+/// [`ClampGradientContract::LegacyRecorded`] it instead **propagates** the pre-2026-08-25 gradient
+/// through the saturated region, reproducing that arithmetic bit-for-bit. `grad_coef` is
+/// **identical under both**.
 pub fn catmull_rom_backward_under(
     coef: &[f32],
     cache: &CatmullRomCache,
