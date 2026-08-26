@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["hymeko_clifford", "hymeko_graph", "hymeko_spline", "hymeko_tensor"]
+members = [
+    "hymeko_clifford",
+    "hymeko_graph",
+    "hymeko_spline",
+    "hymeko_tensor",
+    "hymeko_vision",
+]

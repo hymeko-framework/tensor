@@ -33,6 +33,30 @@ core:
   # separate, approved job — not something to fold into an unrelated change.
   - hymeko_graph
 
+  # Vision primitives: skeleton rasterisation and pixel masking.
+  # Added 2026-08-24 by explicit authorisation, carrying ONLY the bit-identical rasterisation and
+  # masking operators moved out of `nagare/src/vision/skeleton_render.rs`. They have no HyMeKo-
+  # specific semantics -- their argument types are `[f32; 2]`, `[usize; 2]` and `&mut [f32]` -- which
+  # is what made them core-worthy rather than merely shared. A §6.1 discovery pass over all four
+  # existing crates found no owner (`hymeko_graph/src/quadtree.rs` is a spatial subdivision, not a
+  # rasteriser).
+  #
+  # DEPENDENCY-FREE BY CONTRACT, on the `hymeko_clifford` standard: `forbid(unsafe_code)`, no
+  # production `unwrap`/`expect`, Design-by-Contract docs on every public item, and an EMPTY
+  # `[dependencies]` table. Adding a dependency here is a CORE.YAML change requiring separate
+  # approval -- the same protection `hymeko_spline`'s optional `rayon` has.
+  #
+  # SCOPE IS DELIBERATELY NARROW. The authorisation was for these operators "initially and
+  # exclusively". The pose generators, skeleton incidence, bone-length penalty and coordinate
+  # refiner that sit beside them in `nagare` are NOT here and must not be folded in as an extension
+  # of this grant; each is a new proposal.
+  #
+  # Equivalence is not asserted, it is measured: the crate carries verbatim transcriptions of the
+  # two retired `nagare` renderer bodies, and all four `nagare` pose study tests -- each a
+  # 1600-iteration training run asserting recorded pixel errors -- reproduce through it.
+  # See `../nagare/reports/2026-08-24-hymeko-vision-core-crate.md`.
+  - hymeko_vision
+
   # HyMeKoStream IR + matrix-based Rényi-2 estimators.
   # Was an orphan (zero reverse dependencies) until 2026-08-19, while six of its `renyi.rs`
   # functions sat copied inside `nagare/examples/nagare_deep_signed.rs`. Now linked by `nagare`,
@@ -44,7 +68,8 @@ core:
   # its loss was undetectable; `hymeko_spline/tests/build_contract.rs` now fails loudly without it.
   - .cargo/config.toml
 
-# Consumers. `nagare` links hymeko_clifford, hymeko_graph, hymeko_spline and hymeko_tensor by path.
+# Consumers. `nagare` links hymeko_clifford, hymeko_graph, hymeko_spline, hymeko_tensor and
+# hymeko_vision by path.
 # A breaking change to any public API above is a breaking change to the application — check
 # `nagare` builds before proposing one.
 consumers:

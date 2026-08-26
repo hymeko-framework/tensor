@@ -1,0 +1,9 @@
+[package]
+name = "hymeko_vision"
+version = "0.1.0"
+edition = "2021"
+description = "HyMeKo vision primitives. Dependency-free by contract."
+
+# Deliberately empty, and part of the crate's contract — see the CORE.YAML entry and lib.rs.
+# Adding a dependency here is a CORE.YAML change requiring separate approval.
+[dependencies]
