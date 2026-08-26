@@ -13,5 +13,6 @@
 //! Co-located in the `tensor` workspace with the geometric-algebra (`hymeko_clifford`) and hypergraph-incidence
 //! (`hymeko_graph`) foundations of the Tensor pillar.
 
+pub mod linalg;
 pub mod renyi;
 pub mod stream;
