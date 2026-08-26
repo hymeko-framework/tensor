@@ -92,43 +92,39 @@ pub use balance::{BipartiteOnlyPruner, CartwrightHararyPruner, DavisWeakBalanceP
 pub use cycle_enum::{enumerate_simple_cycles, enumerate_simple_cycles_noprune};
 pub use friedler::FriedlerAxiomPruner;
 pub use incidence::{
-    build_edge_incidence, build_edge_incidence_vertex_adj, BuildOpts as IncidenceBuildOpts,
-    IncidenceCoo, IncidenceOutput, IncidenceResult,
+    BuildOpts as IncidenceBuildOpts, IncidenceCoo, IncidenceOutput, IncidenceResult,
+    build_edge_incidence, build_edge_incidence_vertex_adj,
 };
-pub use quadtree::{build_quadtree, forman_kappa_4conn, QuadtreeAnchors};
-pub use vertex_filter::{AndFilter, DegreeFilter, NoFilter, TriangleFilter, VertexFilter};
 pub use pruner::{
     CompositePruner, CountingPruner, CyclePruner, NoOpPruner, PrunerDecision, PrunerStats,
     StatsSnapshot,
 };
+pub use quadtree::{QuadtreeAnchors, build_quadtree, forman_kappa_4conn};
 pub use signed_graph::{Sign, SignedGraph};
 pub use spine::{
     CliffordFIR, FirBackward, GradRequest, SignedCycleFIR, clifford_fir_backward,
     clifford_fir_backward_with, clifford_fir_forward, fir_cycle_forward, fir_cycle_scatter_mean,
 };
-pub use topk_cycles::{tiered_m_v_by_degree, WeightedSumScorer};
-pub use topk_walks::{
-    enumerate_top_k_walks, enumerate_top_k_walks_batch, TopKWalk, TopKWalksBatch,
-};
 pub use topk_cycles::{
-    EntropyGainScorer, HybridScorer, InverseDegreeScorer, TopKBuilder, TopKCycle,
+    EntropyGainScorer, HybridScorer, InverseDegreeScorer, TopKBuilder, TopKCycle, TopKCyclesBatch,
     UniformityHeuristic, UniformityState, degree_adaptive_m_v, enumerate_top_k_cycles,
     enumerate_top_k_cycles_bb, enumerate_top_k_cycles_noprune, enumerate_top_k_cycles_par,
-    enumerate_top_k_cycles_par_bb, enumerate_top_k_cycles_par_entropy,
-    enumerate_top_k_cycles_par_noprune, enumerate_top_k_per_vertex_cycles,
-    enumerate_top_k_per_vertex_cycles_adaptive, enumerate_top_k_per_vertex_cycles_noprune,
-    enumerate_top_k_cycles_par_batched,
-    enumerate_top_k_cycles_par_bb_batched,
-    enumerate_top_k_cycles_par_entropy_batched,
-    enumerate_top_k_per_vertex_cycles_par, enumerate_top_k_per_vertex_cycles_par_adaptive,
+    enumerate_top_k_cycles_par_batched, enumerate_top_k_cycles_par_bb,
+    enumerate_top_k_cycles_par_bb_batched, enumerate_top_k_cycles_par_entropy,
+    enumerate_top_k_cycles_par_entropy_batched, enumerate_top_k_cycles_par_noprune,
+    enumerate_top_k_per_vertex_cycles, enumerate_top_k_per_vertex_cycles_adaptive,
+    enumerate_top_k_per_vertex_cycles_noprune, enumerate_top_k_per_vertex_cycles_par,
+    enumerate_top_k_per_vertex_cycles_par_adaptive,
     enumerate_top_k_per_vertex_cycles_par_adaptive_batched,
     enumerate_top_k_per_vertex_cycles_par_adaptive_starting,
     enumerate_top_k_per_vertex_cycles_par_adaptive_starting_batched,
     enumerate_top_k_per_vertex_cycles_par_adaptive_starting_bb_batched,
     enumerate_top_k_per_vertex_cycles_par_adaptive_starting_bb_global_batched,
-    enumerate_top_k_per_vertex_cycles_par_batched,
-    enumerate_top_k_per_vertex_cycles_par_noprune,
-    TopKCyclesBatch,
+    enumerate_top_k_per_vertex_cycles_par_batched, enumerate_top_k_per_vertex_cycles_par_noprune,
+};
+pub use topk_cycles::{WeightedSumScorer, tiered_m_v_by_degree};
+pub use topk_walks::{
+    TopKWalk, TopKWalksBatch, enumerate_top_k_walks, enumerate_top_k_walks_batch,
 };
 pub use traversal::{
     BFS_UNREACHED, BfsScratch, Csr, DfsScratch, bfs_distances, bidirectional_bfs, bs_clear, bs_get,
@@ -139,3 +135,4 @@ pub use traversal_heuristic::{
     AstarScratch, DegreeHeuristic, Heuristic, ZeroHeuristic, astar, best_first_dfs,
     enumerate_cycles_ordered, enumerate_cycles_ordered_noprune,
 };
+pub use vertex_filter::{AndFilter, DegreeFilter, NoFilter, TriangleFilter, VertexFilter};

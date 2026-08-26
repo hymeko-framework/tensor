@@ -64,7 +64,6 @@ impl BitsetAdj {
     }
 }
 
-
 // ─────────────────────────────────────────────────────────────────────
 // Sorted-pair self-edge map (plan 4.2 — replaces the prior HashMap)
 // ─────────────────────────────────────────────────────────────────────
@@ -225,25 +224,35 @@ fn process_one_edge_into(
         let a = adj_u[i];
         let b = adj_v[j];
         if a < b {
-            if scratch.last().copied() != Some(a) { scratch.push(a); }
+            if scratch.last().copied() != Some(a) {
+                scratch.push(a);
+            }
             i += 1;
         } else if b < a {
-            if scratch.last().copied() != Some(b) { scratch.push(b); }
+            if scratch.last().copied() != Some(b) {
+                scratch.push(b);
+            }
             j += 1;
         } else {
-            if scratch.last().copied() != Some(a) { scratch.push(a); }
+            if scratch.last().copied() != Some(a) {
+                scratch.push(a);
+            }
             i += 1;
             j += 1;
         }
     }
     while i < adj_u.len() {
         let a = adj_u[i];
-        if scratch.last().copied() != Some(a) { scratch.push(a); }
+        if scratch.last().copied() != Some(a) {
+            scratch.push(a);
+        }
         i += 1;
     }
     while j < adj_v.len() {
         let b = adj_v[j];
-        if scratch.last().copied() != Some(b) { scratch.push(b); }
+        if scratch.last().copied() != Some(b) {
+            scratch.push(b);
+        }
         j += 1;
     }
 
@@ -377,9 +386,7 @@ pub fn build_edge_incidence(
     if edges_u.len() != edges_v.len() {
         return Err("edges_u and edges_v must have the same length");
     }
-    if self_keys_u.len() != self_keys_v.len()
-        || self_keys_u.len() != self_tuple_idx.len()
-    {
+    if self_keys_u.len() != self_keys_v.len() || self_keys_u.len() != self_tuple_idx.len() {
         return Err("self_keys_* and self_tuple_idx must have the same length");
     }
 
@@ -396,9 +403,8 @@ pub fn build_edge_incidence(
     } else {
         csr_col_idx.iter().copied().max().unwrap_or(0) as usize + 1
     };
-    let use_bitset = opts.bitset_threshold > 0
-        && n_tuples > 0
-        && n_tuples <= opts.bitset_threshold as usize;
+    let use_bitset =
+        opts.bitset_threshold > 0 && n_tuples > 0 && n_tuples <= opts.bitset_threshold as usize;
 
     let coo = if use_bitset {
         let adj = BitsetAdj::build(csr_row_ptr, csr_col_idx, n_tuples);
@@ -409,11 +415,21 @@ pub fn build_edge_incidence(
         }
     } else if opts.parallel {
         run_parallel(
-            edges_u, edges_v, csr_row_ptr, csr_col_idx, &self_map, n_nodes,
+            edges_u,
+            edges_v,
+            csr_row_ptr,
+            csr_col_idx,
+            &self_map,
+            n_nodes,
         )
     } else {
         run_serial(
-            edges_u, edges_v, csr_row_ptr, csr_col_idx, &self_map, n_nodes,
+            edges_u,
+            edges_v,
+            csr_row_ptr,
+            csr_col_idx,
+            &self_map,
+            n_nodes,
         )
     };
 
@@ -443,9 +459,17 @@ fn run_serial(
 
     for ei in 0..e_query {
         process_one_edge_into(
-            ei as u32, edges_u[ei], edges_v[ei], n_nodes,
-            csr_row_ptr, csr_col_idx, self_map, &mut scratch,
-            &mut rows, &mut cols, &mut vals,
+            ei as u32,
+            edges_u[ei],
+            edges_v[ei],
+            n_nodes,
+            csr_row_ptr,
+            csr_col_idx,
+            self_map,
+            &mut scratch,
+            &mut rows,
+            &mut cols,
+            &mut vals,
         );
     }
     IncidenceCoo { rows, cols, vals }
@@ -496,9 +520,17 @@ fn run_parallel(
             for (local_i, (&u, &v)) in eu.iter().zip(ev.iter()).enumerate() {
                 let ei = (base_ei + local_i) as u32;
                 process_one_edge_into(
-                    ei, u, v, n_nodes,
-                    csr_row_ptr, csr_col_idx, self_map, &mut scratch,
-                    &mut local_rows, &mut local_cols, &mut local_vals,
+                    ei,
+                    u,
+                    v,
+                    n_nodes,
+                    csr_row_ptr,
+                    csr_col_idx,
+                    self_map,
+                    &mut scratch,
+                    &mut local_rows,
+                    &mut local_cols,
+                    &mut local_vals,
                 );
             }
             IncidenceCoo {
@@ -544,9 +576,16 @@ fn run_serial_bitset(
 
     for ei in 0..e_query {
         process_one_edge_bitset_into(
-            ei as u32, edges_u[ei], edges_v[ei], n_nodes,
-            adj, self_map, &mut word_scratch,
-            &mut rows, &mut cols, &mut vals,
+            ei as u32,
+            edges_u[ei],
+            edges_v[ei],
+            n_nodes,
+            adj,
+            self_map,
+            &mut word_scratch,
+            &mut rows,
+            &mut cols,
+            &mut vals,
         );
     }
     IncidenceCoo { rows, cols, vals }
@@ -582,8 +621,16 @@ fn run_parallel_bitset(
             for (local_i, (&u, &v)) in eu.iter().zip(ev.iter()).enumerate() {
                 let ei = (base_ei + local_i) as u32;
                 process_one_edge_bitset_into(
-                    ei, u, v, n_nodes, adj, self_map, &mut word_scratch,
-                    &mut local_rows, &mut local_cols, &mut local_vals,
+                    ei,
+                    u,
+                    v,
+                    n_nodes,
+                    adj,
+                    self_map,
+                    &mut word_scratch,
+                    &mut local_rows,
+                    &mut local_cols,
+                    &mut local_vals,
                 );
             }
             IncidenceCoo {
@@ -687,16 +734,21 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_edges_length() {
-        let err = build_edge_incidence_vertex_adj(
-            &[0u32], &[0u32, 1u32], &[0u32], &[], &[], &[], &[],
-        );
+        let err =
+            build_edge_incidence_vertex_adj(&[0u32], &[0u32, 1u32], &[0u32], &[], &[], &[], &[]);
         assert!(err.is_err());
     }
 
     #[test]
     fn rejects_mismatched_self_arrays() {
         let err = build_edge_incidence_vertex_adj(
-            &[], &[], &[0u32], &[], &[0u32, 1u32], &[1u32], &[0u32],
+            &[],
+            &[],
+            &[0u32],
+            &[],
+            &[0u32, 1u32],
+            &[1u32],
+            &[0u32],
         );
         assert!(err.is_err());
     }
@@ -704,20 +756,16 @@ mod tests {
     #[test]
     fn ignores_query_with_oob_endpoint() {
         let (rp, ci) = make_triangle_csr();
-        let out = build_edge_incidence_vertex_adj(
-            &[9u32], &[0u32], &rp, &ci, &[], &[], &[],
-        )
-        .unwrap();
+        let out =
+            build_edge_incidence_vertex_adj(&[9u32], &[0u32], &rp, &ci, &[], &[], &[]).unwrap();
         assert!(out.rows.is_empty());
     }
 
     #[test]
     fn triangle_query_produces_union_with_uniform_weights() {
         let (rp, ci) = make_triangle_csr();
-        let out = build_edge_incidence_vertex_adj(
-            &[0u32], &[1u32], &rp, &ci, &[], &[], &[],
-        )
-        .unwrap();
+        let out =
+            build_edge_incidence_vertex_adj(&[0u32], &[1u32], &rp, &ci, &[], &[], &[]).unwrap();
         assert_eq!(out.rows, vec![0, 0, 0]);
         assert_eq!(out.cols, vec![0, 1, 2]);
         for &w in &out.vals {
@@ -728,11 +776,9 @@ mod tests {
     #[test]
     fn self_edge_is_excluded_and_weight_renormalised() {
         let (rp, ci) = make_triangle_csr();
-        let out = build_edge_incidence_vertex_adj(
-            &[0u32], &[1u32], &rp, &ci,
-            &[0u32], &[1u32], &[0u32],
-        )
-        .unwrap();
+        let out =
+            build_edge_incidence_vertex_adj(&[0u32], &[1u32], &rp, &ci, &[0u32], &[1u32], &[0u32])
+                .unwrap();
         assert_eq!(out.rows, vec![0, 0]);
         assert_eq!(out.cols, vec![1, 2]);
         for &w in &out.vals {
@@ -744,10 +790,8 @@ mod tests {
     fn empty_adjacency_skips_row() {
         let rp = vec![0u32, 1, 1];
         let ci = vec![0u32];
-        let out = build_edge_incidence_vertex_adj(
-            &[1u32], &[1u32], &rp, &ci, &[], &[], &[],
-        )
-        .unwrap();
+        let out =
+            build_edge_incidence_vertex_adj(&[1u32], &[1u32], &rp, &ci, &[], &[], &[]).unwrap();
         assert!(out.rows.is_empty());
     }
 
@@ -756,12 +800,14 @@ mod tests {
     #[test]
     fn parallel_matches_serial_on_triangle() {
         let (rp, ci) = make_triangle_csr();
-        let opts = BuildOpts { parallel: true, ..BuildOpts::default() };
-        let r = build_edge_incidence(
-            &[0u32], &[1u32], &rp, &ci, &[], &[], &[], opts,
-        )
-        .unwrap();
-        let IncidenceResult::Coo(coo) = r else { panic!("expected Coo") };
+        let opts = BuildOpts {
+            parallel: true,
+            ..BuildOpts::default()
+        };
+        let r = build_edge_incidence(&[0u32], &[1u32], &rp, &ci, &[], &[], &[], opts).unwrap();
+        let IncidenceResult::Coo(coo) = r else {
+            panic!("expected Coo")
+        };
         assert_eq!(coo.rows, vec![0, 0, 0]);
         assert_eq!(coo.cols, vec![0, 1, 2]);
     }
@@ -773,11 +819,14 @@ mod tests {
             output: IncidenceOutput::Csr,
             ..BuildOpts::default()
         };
-        let r = build_edge_incidence(
-            &[0u32, 1u32], &[1u32, 2u32], &rp, &ci, &[], &[], &[], opts,
-        )
-        .unwrap();
-        let IncidenceResult::Csr { row_ptr, cols, vals } = r else {
+        let r = build_edge_incidence(&[0u32, 1u32], &[1u32, 2u32], &rp, &ci, &[], &[], &[], opts)
+            .unwrap();
+        let IncidenceResult::Csr {
+            row_ptr,
+            cols,
+            vals,
+        } = r
+        else {
             panic!("expected Csr")
         };
         // 2 query edges → row_ptr.len() == 3.

@@ -1,9 +1,6 @@
 //! Compressed sparse-row adjacency + bitset helpers.
 
-
-pub fn build_csr(edges: &[(u32, u32)], n_nodes: usize, directed: bool)
-    -> (Vec<u32>, Vec<u32>)
-{
+pub fn build_csr(edges: &[(u32, u32)], n_nodes: usize, directed: bool) -> (Vec<u32>, Vec<u32>) {
     // Tightly-packed CSR. Each row is sorted + dedup'd; row_ptr[i+1] -
     // row_ptr[i] is exactly the unique-neighbour count for vertex i. No
     // u32::MAX sentinel; `neighbours` returns a clean slice in O(1).
@@ -13,7 +10,9 @@ pub fn build_csr(edges: &[(u32, u32)], n_nodes: usize, directed: bool)
     let mut deg = vec![0u32; n_nodes];
     for &(u, v) in edges {
         deg[u as usize] += 1;
-        if !directed { deg[v as usize] += 1; }
+        if !directed {
+            deg[v as usize] += 1;
+        }
     }
     let mut raw_ptr = vec![0u32; n_nodes + 1];
     for i in 0..n_nodes {
@@ -68,13 +67,19 @@ pub fn has_edge(row_ptr: &[u32], col_idx: &[u32], u: u32, v: u32) -> bool {
 // path — 8× smaller, fits in L1 for graphs up to ~500k nodes.
 // ============================================================================
 
-#[inline] pub fn bs_words(n: usize) -> usize { n.div_ceil(64) }
-#[inline] pub fn bs_get(bits: &[u64], v: u32) -> bool {
+#[inline]
+pub fn bs_words(n: usize) -> usize {
+    n.div_ceil(64)
+}
+#[inline]
+pub fn bs_get(bits: &[u64], v: u32) -> bool {
     (bits[(v >> 6) as usize] >> (v & 63)) & 1 == 1
 }
-#[inline] pub fn bs_set(bits: &mut [u64], v: u32) {
+#[inline]
+pub fn bs_set(bits: &mut [u64], v: u32) {
     bits[(v >> 6) as usize] |= 1u64 << (v & 63);
 }
-#[inline] pub fn bs_clear(bits: &mut [u64], v: u32) {
+#[inline]
+pub fn bs_clear(bits: &mut [u64], v: u32) {
     bits[(v >> 6) as usize] &= !(1u64 << (v & 63));
 }

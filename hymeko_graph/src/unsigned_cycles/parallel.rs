@@ -15,8 +15,20 @@ pub fn merge_sinks(a: Sink, b: Sink, k: usize) -> Sink {
             buf_a.extend_from_slice(&buf_b);
             Sink::Full(buf_a)
         }
-        (Sink::Reservoir { buf: ba, cap, seen: sa, rng_state: rsa },
-         Sink::Reservoir { buf: bb, seen: sb, rng_state: rsb, .. }) => {
+        (
+            Sink::Reservoir {
+                buf: ba,
+                cap,
+                seen: sa,
+                rng_state: rsa,
+            },
+            Sink::Reservoir {
+                buf: bb,
+                seen: sb,
+                rng_state: rsb,
+                ..
+            },
+        ) => {
             // Stratified merge. Each stratum (a, b) is itself a uniform
             // sample of its observed `seen_t` cycles. We allocate the
             // global cap proportionally: target_a = cap * sa / (sa+sb).
@@ -30,7 +42,8 @@ pub fn merge_sinks(a: Sink, b: Sink, k: usize) -> Sink {
                 0
             } else {
                 ((cap as u128 * sa as u128) / new_seen as u128) as usize
-            }.min(avail_a);
+            }
+            .min(avail_a);
             let target_b = cap.saturating_sub(target_a).min(avail_b);
             // Backfill if one side underdelivered (rare, only at boundary).
             let target_a = (cap.saturating_sub(target_b)).min(avail_a).max(target_a);
@@ -44,8 +57,14 @@ pub fn merge_sinks(a: Sink, b: Sink, k: usize) -> Sink {
                 rng_state: rsa ^ rsb.rotate_left(13),
             }
         }
-        (Sink::EarlyStop { mut buf, cap, global },
-         Sink::EarlyStop { buf: bb, .. }) => {
+        (
+            Sink::EarlyStop {
+                mut buf,
+                cap,
+                global,
+            },
+            Sink::EarlyStop { buf: bb, .. },
+        ) => {
             let needed = cap.saturating_sub(buf.len() / k) * k;
             let take = needed.min(bb.len());
             buf.extend_from_slice(&bb[..take]);
@@ -133,9 +152,9 @@ pub fn enumerate_parallel(
                 || {
                     let tid = rayon::current_thread_index().unwrap_or(0) as u64;
                     let s = make_thread_sink(
-                        max_cycles, global_es.as_ref(),
-                        seed.wrapping_add(tid)
-                            .wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                        max_cycles,
+                        global_es.as_ref(),
+                        seed.wrapping_add(tid).wrapping_mul(0x9e37_79b9_7f4a_7c15),
                     );
                     // Per-fold-segment scratch: visited bitset, BFS dist
                     // buffer and BFS frontier/next queues. Reused across
@@ -147,12 +166,14 @@ pub fn enumerate_parallel(
                     } else {
                         vec![u8::MAX; n_nodes]
                     };
-                    (vec![0u64; words],
-                     Vec::with_capacity(k),
-                     dist,
-                     Vec::<u32>::new(),
-                     Vec::<u32>::new(),
-                     s)
+                    (
+                        vec![0u64; words],
+                        Vec::with_capacity(k),
+                        dist,
+                        Vec::<u32>::new(),
+                        Vec::<u32>::new(),
+                        s,
+                    )
                 },
                 |(mut visited, mut path, mut dist, mut bfs_a, mut bfs_b, mut sink), start| {
                     // Early-stop short-circuit at the segment level.
@@ -163,12 +184,14 @@ pub fn enumerate_parallel(
                     }
                     if !directed {
                         bfs_distances_into(
-                            row_ptr, col_idx, start, n_nodes, k as u8,
-                            &mut dist, &mut bfs_a, &mut bfs_b,
+                            row_ptr, col_idx, start, n_nodes, k as u8, &mut dist, &mut bfs_a,
+                            &mut bfs_b,
                         );
                     }
                     for &first_hop in neighbours(row_ptr, col_idx, start) {
-                        if first_hop <= start { continue; }
+                        if first_hop <= start {
+                            continue;
+                        }
                         // Bound check: first_hop must lie within k-1 hops
                         // of start (it does — it's at distance 1 — but the
                         // check is free and guards future API changes).
@@ -176,10 +199,20 @@ pub fn enumerate_parallel(
                             continue;
                         }
                         let cont = dfs_from_pair(
-                            row_ptr, col_idx, start, first_hop, k, directed,
-                            &mut visited, &mut path, &dist, &mut sink,
+                            row_ptr,
+                            col_idx,
+                            start,
+                            first_hop,
+                            k,
+                            directed,
+                            &mut visited,
+                            &mut path,
+                            &dist,
+                            &mut sink,
                         );
-                        if !cont { break; }
+                        if !cont {
+                            break;
+                        }
                     }
                     (visited, path, dist, bfs_a, bfs_b, sink)
                 },

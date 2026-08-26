@@ -16,7 +16,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cycle_sampler::{
-    canonical_cycle, enumerate_par, lcg_for_batch, CycleSampler, SamplerScratch,
+    CycleSampler, SamplerScratch, canonical_cycle, enumerate_par, lcg_for_batch,
 };
 use crate::rand_lcg::Lcg;
 use crate::unsigned_cycles::{build_csr, has_edge, neighbours};
@@ -52,8 +52,7 @@ impl<'a> CycleSampler for ColorCodingSampler<'a> {
                 &mut used,
                 &mut scratch.local_out,
             );
-            if start.is_multiple_of(512)
-                && target_reached.load(Ordering::Relaxed) >= target_cycles
+            if start.is_multiple_of(512) && target_reached.load(Ordering::Relaxed) >= target_cycles
             {
                 break;
             }
@@ -73,8 +72,11 @@ pub fn enumerate_color_coded(
     max_colorings: Option<usize>,
     n_threads: Option<usize>,
 ) -> Vec<u32> {
-    let edges: Vec<(u32, u32)> =
-        edges_u.iter().copied().zip(edges_v.iter().copied()).collect();
+    let edges: Vec<(u32, u32)> = edges_u
+        .iter()
+        .copied()
+        .zip(edges_v.iter().copied())
+        .collect();
     let (row_ptr, col_idx) = build_csr(&edges, n_nodes, false);
 
     // Default budget: ~5x coverage at the k!/k^k rainbow rate.
@@ -89,7 +91,15 @@ pub fn enumerate_color_coded(
         n_nodes,
         k,
     };
-    enumerate_par(&sampler, n_nodes, k, target_cycles, n_batches, seed, n_threads)
+    enumerate_par(
+        &sampler,
+        n_nodes,
+        k,
+        target_cycles,
+        n_batches,
+        seed,
+        n_threads,
+    )
 }
 
 // ─── internals ──────────────────────────────────────────────────────
@@ -120,7 +130,17 @@ fn dfs_color_coded(
     visited[start as usize] = true;
     *used_colors |= 1u32 << colors[start as usize];
 
-    recurse(row_ptr, col_idx, start, k, colors, path, visited, used_colors, out);
+    recurse(
+        row_ptr,
+        col_idx,
+        start,
+        k,
+        colors,
+        path,
+        visited,
+        used_colors,
+        out,
+    );
 
     path.pop();
     visited[start as usize] = false;
@@ -163,7 +183,15 @@ fn recurse(
         visited[nxt as usize] = true;
         *used_colors |= bit;
         recurse(
-            row_ptr, col_idx, start, k, colors, path, visited, used_colors, out,
+            row_ptr,
+            col_idx,
+            start,
+            k,
+            colors,
+            path,
+            visited,
+            used_colors,
+            out,
         );
         path.pop();
         visited[nxt as usize] = false;

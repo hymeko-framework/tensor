@@ -80,7 +80,12 @@ impl HeapEntry {
         let mut s = [0i8; MAX_INLINE_WALK_LEN];
         w[..walk.len()].copy_from_slice(walk);
         s[..signs.len()].copy_from_slice(signs);
-        HeapEntry { score, walk_len: signs.len() as u8, walk: w, signs: s }
+        HeapEntry {
+            score,
+            walk_len: signs.len() as u8,
+            walk: w,
+            signs: s,
+        }
     }
 
     fn walk_slice(&self) -> &[u32] {
@@ -93,8 +98,16 @@ impl HeapEntry {
     /// Score-then-lex preference; replaces NaN with -inf so admissibility
     /// violations on input don't crash the heap order.
     fn cmp_preference(&self, other: &Self) -> Ordering {
-        let a = if self.score.is_nan() { f64::NEG_INFINITY } else { self.score };
-        let b = if other.score.is_nan() { f64::NEG_INFINITY } else { other.score };
+        let a = if self.score.is_nan() {
+            f64::NEG_INFINITY
+        } else {
+            self.score
+        };
+        let b = if other.score.is_nan() {
+            f64::NEG_INFINITY
+        } else {
+            other.score
+        };
         a.partial_cmp(&b)
             .unwrap_or(Ordering::Equal)
             .then_with(|| self.walk_slice().cmp(other.walk_slice()))
@@ -147,8 +160,7 @@ pub fn enumerate_top_k_walks<S: BoundedScorer>(
     let mut visited = vec![false; n];
     let mut path: Vec<u32> = Vec::with_capacity(walk_len + 1);
     let mut signs: Vec<i8> = Vec::with_capacity(walk_len);
-    let mut heap: BinaryHeap<HeapEntry> =
-        BinaryHeap::with_capacity(top_k + 1);
+    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
 
     for start in 0..(n as u32) {
         path.clear();
@@ -156,9 +168,17 @@ pub fn enumerate_top_k_walks<S: BoundedScorer>(
         path.push(start);
         visited[start as usize] = true;
         dfs(
-            start, &row_ptr, &col_idx, &signs_csr,
-            walk_len, top_k, scorer,
-            &mut path, &mut signs, &mut visited, &mut heap,
+            start,
+            &row_ptr,
+            &col_idx,
+            &signs_csr,
+            walk_len,
+            top_k,
+            scorer,
+            &mut path,
+            &mut signs,
+            &mut visited,
+            &mut heap,
         );
         visited[start as usize] = false;
     }
@@ -190,7 +210,12 @@ pub fn enumerate_top_k_walks_batch<S: BoundedScorer>(
         signs.extend_from_slice(&ss);
         scores.push(sc);
     }
-    TopKWalksBatch { walks, signs, scores, walk_len }
+    TopKWalksBatch {
+        walks,
+        signs,
+        scores,
+        walk_len,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,9 +277,9 @@ fn dfs<S: BoundedScorer>(
         path.push(nxt);
         signs.push(edge_sign);
         visited[nxt as usize] = true;
-        dfs(start, row_ptr, col_idx, signs_csr,
-            walk_len, top_k, scorer,
-            path, signs, visited, heap);
+        dfs(
+            start, row_ptr, col_idx, signs_csr, walk_len, top_k, scorer, path, signs, visited, heap,
+        );
         path.pop();
         signs.pop();
         visited[nxt as usize] = false;
@@ -275,7 +300,7 @@ mod tests {
         // ``signs`` are i8 in ±1 (Pos / Neg) per the canonical layout.
         let eu: [u32; 4] = [0, 1, 0, 2];
         let ev: [u32; 4] = [1, 2, 2, 3];
-        let es: [i8; 4]  = [1, -1, 1, -1];
+        let es: [i8; 4] = [1, -1, 1, -1];
         SignedGraph::from_parts(4, &eu, &ev, &es)
     }
 
@@ -309,8 +334,11 @@ mod tests {
         let s = FractionNegativeScorer;
         let v = enumerate_top_k_walks(&g, 2, 10, &s);
         for w in v.windows(2) {
-            assert!(w[0].0 >= w[1].0,
-                    "scores not in descending order: {:?}", v.iter().map(|x| x.0).collect::<Vec<_>>());
+            assert!(
+                w[0].0 >= w[1].0,
+                "scores not in descending order: {:?}",
+                v.iter().map(|x| x.0).collect::<Vec<_>>()
+            );
         }
     }
 
@@ -322,8 +350,10 @@ mod tests {
         for (_score, walk, signs) in &v {
             assert_eq!(signs.len(), 3);
             assert_eq!(walk.len(), 4);
-            assert!(walk[0] <= walk[walk.len() - 1],
-                    "canonical form violated: walk={walk:?}");
+            assert!(
+                walk[0] <= walk[walk.len() - 1],
+                "canonical form violated: walk={walk:?}"
+            );
         }
     }
 
@@ -336,8 +366,11 @@ mod tests {
             let mut sorted = walk.clone();
             sorted.sort();
             sorted.dedup();
-            assert_eq!(sorted.len(), walk.len(),
-                       "vertex revisited in walk: {walk:?}");
+            assert_eq!(
+                sorted.len(),
+                walk.len(),
+                "vertex revisited in walk: {walk:?}"
+            );
         }
     }
 
@@ -356,17 +389,25 @@ mod tests {
     /// every start, score it, filter canonical, sort, take K. Used to
     /// verify the heap-bounded ABB result matches the exhaustive top-K.
     fn brute_top_k<S: BoundedScorer>(
-        g: &SignedGraph, walk_len: usize, top_k: usize, scorer: &S,
+        g: &SignedGraph,
+        walk_len: usize,
+        top_k: usize,
+        scorer: &S,
     ) -> Vec<TopKWalk> {
         let (row_ptr, col_idx, signs_csr) = g.build_csr_with_signs();
         let n = g.n_nodes as usize;
         let mut all: Vec<TopKWalk> = Vec::new();
 
         fn rec(
-            row_ptr: &[u32], col_idx: &[u32], signs_csr: &[i8],
-            start: u32, walk_len: usize,
-            path: &mut Vec<u32>, signs: &mut Vec<i8>,
-            visited: &mut Vec<bool>, all: &mut Vec<TopKWalk>,
+            row_ptr: &[u32],
+            col_idx: &[u32],
+            signs_csr: &[i8],
+            start: u32,
+            walk_len: usize,
+            path: &mut Vec<u32>,
+            signs: &mut Vec<i8>,
+            visited: &mut Vec<bool>,
+            all: &mut Vec<TopKWalk>,
             scorer: &dyn crate::topk_cycles::BoundedScorer,
         ) {
             if signs.len() == walk_len {
@@ -381,14 +422,18 @@ mod tests {
             let e = row_ptr[tail as usize + 1] as usize;
             for ei in s..e {
                 let nxt = col_idx[ei];
-                if visited[nxt as usize] { continue; }
+                if visited[nxt as usize] {
+                    continue;
+                }
                 let sign = signs_csr[ei];
                 path.push(nxt);
                 signs.push(sign);
                 visited[nxt as usize] = true;
-                rec(row_ptr, col_idx, signs_csr, start, walk_len,
-                    path, signs, visited, all, scorer);
-                path.pop(); signs.pop();
+                rec(
+                    row_ptr, col_idx, signs_csr, start, walk_len, path, signs, visited, all, scorer,
+                );
+                path.pop();
+                signs.pop();
                 visited[nxt as usize] = false;
             }
         }
@@ -397,11 +442,22 @@ mod tests {
         let mut path = Vec::new();
         let mut signs = Vec::new();
         for start in 0..(n as u32) {
-            path.clear(); signs.clear();
+            path.clear();
+            signs.clear();
             path.push(start);
             visited[start as usize] = true;
-            rec(&row_ptr, &col_idx, &signs_csr, start, walk_len,
-                &mut path, &mut signs, &mut visited, &mut all, scorer);
+            rec(
+                &row_ptr,
+                &col_idx,
+                &signs_csr,
+                start,
+                walk_len,
+                &mut path,
+                &mut signs,
+                &mut visited,
+                &mut all,
+                scorer,
+            );
             visited[start as usize] = false;
         }
         all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
@@ -422,8 +478,10 @@ mod tests {
                 let brute = brute_top_k(&g, walk_len, k, &s);
                 let abb_scores: Vec<f64> = abb.iter().map(|x| x.0).collect();
                 let brute_scores: Vec<f64> = brute.iter().map(|x| x.0).collect();
-                assert_eq!(abb_scores, brute_scores,
-                    "ABB top-{k} (walk_len={walk_len}) scores differ from brute: {abb_scores:?} vs {brute_scores:?}");
+                assert_eq!(
+                    abb_scores, brute_scores,
+                    "ABB top-{k} (walk_len={walk_len}) scores differ from brute: {abb_scores:?} vs {brute_scores:?}"
+                );
             }
         }
     }

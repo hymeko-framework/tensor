@@ -95,9 +95,7 @@ pub fn enumerate_par<S: CycleSampler>(
                 return;
             }
             let mut scratch = SamplerScratch::new(n_nodes, k);
-            sampler.run_batch(
-                batch_idx, seed, &mut scratch, &total_kept, target_cycles,
-            );
+            sampler.run_batch(batch_idx, seed, &mut scratch, &total_kept, target_cycles);
             for cyc in scratch.local_out.drain(..) {
                 if total_kept.load(Ordering::Relaxed) >= target_cycles {
                     break;

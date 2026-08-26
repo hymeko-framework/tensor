@@ -117,9 +117,7 @@ impl VertexFilter for TriangleFilter {
                 }
             }
         }
-        (0..n as u32)
-            .filter(|&v| in_triangle[v as usize])
-            .collect()
+        (0..n as u32).filter(|&v| in_triangle[v as usize]).collect()
     }
     fn name(&self) -> &'static str {
         "triangle"
@@ -237,9 +235,11 @@ mod tests {
     #[test]
     fn keep_set_is_sorted_ascending() {
         let g = fixture();
-        for v in [DegreeFilter::default().keep_set(&g),
-                   TriangleFilter.keep_set(&g),
-                   NoFilter.keep_set(&g)] {
+        for v in [
+            DegreeFilter::default().keep_set(&g),
+            TriangleFilter.keep_set(&g),
+            NoFilter.keep_set(&g),
+        ] {
             for w in v.windows(2) {
                 assert!(w[0] < w[1], "keep_set must be sorted ascending");
             }

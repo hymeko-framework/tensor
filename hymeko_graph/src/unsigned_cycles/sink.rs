@@ -23,7 +23,9 @@ pub enum Sink {
 }
 
 impl Sink {
-    pub fn new_full() -> Self { Sink::Full(Vec::new()) }
+    pub fn new_full() -> Self {
+        Sink::Full(Vec::new())
+    }
     pub fn new_reservoir(cap: usize, seed: u64) -> Self {
         Sink::Reservoir {
             buf: Vec::new(),
@@ -35,7 +37,11 @@ impl Sink {
         }
     }
     pub fn new_early_stop(cap: usize, global: std::sync::Arc<AtomicUsize>) -> Self {
-        Sink::EarlyStop { buf: Vec::new(), cap, global }
+        Sink::EarlyStop {
+            buf: Vec::new(),
+            cap,
+            global,
+        }
     }
 
     /// LCG step → next u64. Uses Knuth's MMIX constants.
@@ -55,7 +61,12 @@ impl Sink {
                 buf.extend_from_slice(path);
                 true
             }
-            Sink::Reservoir { buf, cap, seen, rng_state } => {
+            Sink::Reservoir {
+                buf,
+                cap,
+                seen,
+                rng_state,
+            } => {
                 let k = path.len();
                 if *seen < *cap {
                     buf.extend_from_slice(path);

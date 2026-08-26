@@ -11,8 +11,12 @@ use std::time::Instant;
 use hymeko_graph::spine::{SignedCycleFIR, fir_cycle_forward};
 use hymeko_graph::topk_cycles::TopKCyclesBatch;
 
-fn make_fixture(n_vertices: usize, n_cycles: usize, k: usize, d: usize)
-    -> (TopKCyclesBatch, Vec<f32>) {
+fn make_fixture(
+    n_vertices: usize,
+    n_cycles: usize,
+    k: usize,
+    d: usize,
+) -> (TopKCyclesBatch, Vec<f32>) {
     use rand::{Rng, SeedableRng};
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
     let mut cycles: Vec<u32> = Vec::with_capacity(n_cycles * k);
@@ -27,13 +31,22 @@ fn make_fixture(n_vertices: usize, n_cycles: usize, k: usize, d: usize)
         .map(|i| (i as f32) / (n_vertices * d) as f32)
         .collect();
     let batch = TopKCyclesBatch {
-        cycles, signs, scores: vec![0.0; n_cycles], k,
+        cycles,
+        signs,
+        scores: vec![0.0; n_cycles],
+        k,
     };
     (batch, features)
 }
 
-fn bench_one(label: &str, batch: &TopKCyclesBatch, features: &[f32],
-              n_vertices: usize, d: usize, fir: &SignedCycleFIR) {
+fn bench_one(
+    label: &str,
+    batch: &TopKCyclesBatch,
+    features: &[f32],
+    n_vertices: usize,
+    d: usize,
+    fir: &SignedCycleFIR,
+) {
     // Warm-up
     let _ = fir_cycle_forward(batch, features, n_vertices, d, fir);
     let mut times: Vec<f64> = Vec::new();
@@ -50,7 +63,10 @@ fn bench_one(label: &str, batch: &TopKCyclesBatch, features: &[f32],
     let gbps = bytes_read / median / 1e9;
     println!(
         "{:<25}  median={:7.4} ms  {:8.2} M cycles/s  {:5.2} GB/s effective",
-        label, median * 1e3, cycles_per_s / 1e6, gbps,
+        label,
+        median * 1e3,
+        cycles_per_s / 1e6,
+        gbps,
     );
 }
 

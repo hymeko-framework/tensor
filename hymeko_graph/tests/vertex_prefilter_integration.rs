@@ -24,10 +24,14 @@ fn fixture() -> SignedGraph {
     SignedGraph {
         n_nodes: 8,
         edges: vec![
-            (0, 1), (1, 2), (0, 2),       // triangle A
-            (3, 4), (4, 5), (3, 5),       // triangle B
-            (2, 3),                        // bridge
-            (0, 7),                        // leaf
+            (0, 1),
+            (1, 2),
+            (0, 2), // triangle A
+            (3, 4),
+            (4, 5),
+            (3, 5), // triangle B
+            (2, 3), // bridge
+            (0, 7), // leaf
         ],
         signs: vec![1; 8],
     }
@@ -58,7 +62,10 @@ fn starting_with_full_range_matches_unfiltered() {
 
     let base_keys = canonical_keys(&baseline);
     let all_keys = canonical_keys(&with_all);
-    assert_eq!(base_keys, all_keys, "full-range starting must match unfiltered");
+    assert_eq!(
+        base_keys, all_keys,
+        "full-range starting must match unfiltered"
+    );
 }
 
 #[test]
@@ -68,8 +75,7 @@ fn empty_starting_returns_no_cycles() {
     let m_v = vec![16u32; g.n_nodes as usize];
     let score = |_c: &[u32], _s: &[i8]| 0.0;
 
-    let out =
-        enumerate_top_k_per_vertex_cycles_par_adaptive_starting(&g, 3, &p, &m_v, &[], score);
+    let out = enumerate_top_k_per_vertex_cycles_par_adaptive_starting(&g, 3, &p, &m_v, &[], score);
     assert!(out.is_empty(), "empty starting set must return no cycles");
 }
 
@@ -130,8 +136,14 @@ fn single_vertex_starting_only_emits_cycles_through_that_vertex() {
     }
 
     let keys = canonical_keys(&out);
-    assert!(keys.contains(&vec![0u32, 1, 2]), "triangle (0,1,2) should be found");
-    assert!(!keys.contains(&vec![3u32, 4, 5]), "triangle (3,4,5) must NOT be found from start=0");
+    assert!(
+        keys.contains(&vec![0u32, 1, 2]),
+        "triangle (0,1,2) should be found"
+    );
+    assert!(
+        !keys.contains(&vec![3u32, 4, 5]),
+        "triangle (3,4,5) must NOT be found from start=0"
+    );
 }
 
 #[test]

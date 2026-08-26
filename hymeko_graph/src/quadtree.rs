@@ -46,10 +46,7 @@ use std::collections::HashMap;
 /// vertex_kappa[v] = (1 / deg(v)) · Σ_{u ∈ N(v)} (2 − deg(v) − deg(u))
 /// ```
 /// when `deg(v) > 0`; `0` otherwise.
-pub fn forman_kappa_4conn(
-    frontier_positions: &[(i64, i64)],
-    frontier_size: i64,
-) -> Vec<f32> {
+pub fn forman_kappa_4conn(frontier_positions: &[(i64, i64)], frontier_size: i64) -> Vec<f32> {
     let n = frontier_positions.len();
     if n == 0 {
         return Vec::new();
@@ -57,16 +54,14 @@ pub fn forman_kappa_4conn(
 
     // Spatial-hash lookup: (row, col) → local frontier index.  All
     // anchors at the same depth share `frontier_size`.
-    let mut pos_to_local: HashMap<(i64, i64), usize> =
-        HashMap::with_capacity(n);
+    let mut pos_to_local: HashMap<(i64, i64), usize> = HashMap::with_capacity(n);
     for (li, &(r, c)) in frontier_positions.iter().enumerate() {
         pos_to_local.insert((r, c), li);
     }
 
     // Compute degree + neighbour list per anchor (≤ 4 each).
     let s = frontier_size;
-    let mut neighbours: Vec<arrayvec_lite::ArrayVec4> =
-        vec![arrayvec_lite::ArrayVec4::new(); n];
+    let mut neighbours: Vec<arrayvec_lite::ArrayVec4> = vec![arrayvec_lite::ArrayVec4::new(); n];
     let mut degree: Vec<u8> = vec![0; n];
     for (li, &(r, c)) in frontier_positions.iter().enumerate() {
         for (dr, dc) in [(s, 0i64), (-s, 0), (0, s), (0, -s)] {
@@ -107,7 +102,10 @@ mod arrayvec_lite {
     }
     impl ArrayVec4 {
         pub fn new() -> Self {
-            Self { data: [0; 4], len: 0 }
+            Self {
+                data: [0; 4],
+                len: 0,
+            }
         }
         pub fn push(&mut self, v: usize) {
             debug_assert!(self.len < 4);
@@ -134,11 +132,11 @@ mod arrayvec_lite {
 #[derive(Debug, Clone)]
 pub struct QuadtreeAnchors {
     /// `(row, col)` top-left position of each anchor in image coordinates.
-    pub positions:      Vec<(i64, i64)>,
+    pub positions: Vec<(i64, i64)>,
     /// Side length (square anchors) in pixels.
-    pub sizes:          Vec<i64>,
+    pub sizes: Vec<i64>,
     /// Subdivision depth: depth `d` anchors have side `patch_size_initial / 2^d`.
-    pub scales:         Vec<i64>,
+    pub scales: Vec<i64>,
     /// Index into this same set of vectors of the anchor that was
     /// subdivided to produce this one (or `-1` for the depth-0 base tiling).
     pub parent_indices: Vec<i64>,
@@ -207,9 +205,9 @@ where
 {
     let max_anchors_usize = max_anchors.max(0) as usize;
     let mut positions: Vec<(i64, i64)> = Vec::with_capacity(max_anchors_usize);
-    let mut sizes:     Vec<i64>        = Vec::with_capacity(max_anchors_usize);
-    let mut scales:    Vec<i64>        = Vec::with_capacity(max_anchors_usize);
-    let mut parent_indices: Vec<i64>   = Vec::with_capacity(max_anchors_usize);
+    let mut sizes: Vec<i64> = Vec::with_capacity(max_anchors_usize);
+    let mut scales: Vec<i64> = Vec::with_capacity(max_anchors_usize);
+    let mut parent_indices: Vec<i64> = Vec::with_capacity(max_anchors_usize);
 
     // ---- Initial tiling at depth 0 (no scoring needed) ----
     let mut r: i64 = 0;
@@ -232,7 +230,7 @@ where
     while !frontier.is_empty() && current_depth < max_depth {
         let n_front = frontier.len();
         let mut frontier_positions: Vec<(i64, i64)> = Vec::with_capacity(n_front);
-        let mut frontier_sizes:     Vec<i64>        = Vec::with_capacity(n_front);
+        let mut frontier_sizes: Vec<i64> = Vec::with_capacity(n_front);
         for &fi in &frontier {
             frontier_positions.push(positions[fi]);
             frontier_sizes.push(sizes[fi]);
@@ -241,7 +239,8 @@ where
         // ---- Variance via caller-supplied closure ----
         let variances: Vec<f32> = score_fn(&frontier_positions, &frontier_sizes);
         debug_assert_eq!(
-            variances.len(), n_front,
+            variances.len(),
+            n_front,
             "score_fn must return one score per frontier anchor",
         );
 
@@ -260,8 +259,7 @@ where
         // ---- Combined score = w_v·var + w_κ·|κ| ----
         let mut scores: Vec<f32> = Vec::with_capacity(n_front);
         for i in 0..n_front {
-            let s = variance_weight * variances[i]
-                  + curvature_weight * kappa[i].abs();
+            let s = variance_weight * variances[i] + curvature_weight * kappa[i].abs();
             scores.push(s);
         }
 
@@ -298,7 +296,12 @@ where
         current_depth += 1;
     }
 
-    QuadtreeAnchors { positions, sizes, scales, parent_indices }
+    QuadtreeAnchors {
+        positions,
+        sizes,
+        scales,
+        parent_indices,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -374,10 +377,7 @@ mod tests {
 
     #[test]
     fn build_quadtree_empty_image_returns_empty() {
-        let anchors = build_quadtree(
-            0, 0, 4, 1, 4, 1024, 1.0, 0.0, 0.0,
-            |_, _| Vec::new(),
-        );
+        let anchors = build_quadtree(0, 0, 4, 1, 4, 1024, 1.0, 0.0, 0.0, |_, _| Vec::new());
         assert!(anchors.is_empty());
     }
 
@@ -385,11 +385,9 @@ mod tests {
     fn build_quadtree_uniform_low_score_no_subdivision() {
         // 16×16 image, root cells 8×8 → 4 cells at depth 0.
         // score_fn returns 0 everywhere; threshold 0.5 → no subdivision.
-        let anchors = build_quadtree(
-            16, 16, 8, 1, 4, 64,
-            1.0, 0.0, 0.5,
-            |pos, _| vec![0.0; pos.len()],
-        );
+        let anchors = build_quadtree(16, 16, 8, 1, 4, 64, 1.0, 0.0, 0.5, |pos, _| {
+            vec![0.0; pos.len()]
+        });
         assert_eq!(anchors.len(), 4, "expected 4 root cells, no children");
         assert!(anchors.scales.iter().all(|&s| s == 0));
         assert!(anchors.parent_indices.iter().all(|&p| p == -1));
@@ -400,11 +398,9 @@ mod tests {
         // 16×16, root 8×8 → 4 root cells.  score_fn returns 1.0 always.
         // Children would be 4×4; patch_size_min=2 lets them be created.
         // After 1 depth: 4 root + 4×4 = 20 anchors.
-        let anchors = build_quadtree(
-            16, 16, 8, 2, 1, 64,
-            1.0, 0.0, 0.5,
-            |pos, _| vec![1.0; pos.len()],
-        );
+        let anchors = build_quadtree(16, 16, 8, 2, 1, 64, 1.0, 0.0, 0.5, |pos, _| {
+            vec![1.0; pos.len()]
+        });
         assert_eq!(anchors.len(), 4 + 16);
         let n_root = anchors.scales.iter().filter(|&&s| s == 0).count();
         let n_depth_1 = anchors.scales.iter().filter(|&&s| s == 1).count();
@@ -415,8 +411,15 @@ mod tests {
     #[test]
     fn build_quadtree_respects_budget_cap() {
         let anchors = build_quadtree(
-            16, 16, 8, 1, 4, 6, // max_anchors = 6
-            1.0, 0.0, 0.5,
+            16,
+            16,
+            8,
+            1,
+            4,
+            6, // max_anchors = 6
+            1.0,
+            0.0,
+            0.5,
             |pos, _| vec![1.0; pos.len()],
         );
         assert!(anchors.len() <= 6, "got {}", anchors.len());
@@ -433,14 +436,10 @@ mod tests {
         // score_fn is called ONCE at depth 0 (frontier = 4 root cells).
         // Note: depth-1 frontier IS evaluated but no subdivision since
         // child_size 2 < patch_size_min 4.
-        let _ = build_quadtree(
-            16, 16, 8, 4, 4, 1024,
-            1.0, 0.0, 0.5,
-            |pos, _| {
-                n_calls += 1;
-                vec![1.0; pos.len()]
-            },
-        );
+        let _ = build_quadtree(16, 16, 8, 4, 4, 1024, 1.0, 0.0, 0.5, |pos, _| {
+            n_calls += 1;
+            vec![1.0; pos.len()]
+        });
         // Depth 0 frontier ⇒ subdivides into depth-1 frontier of 16.
         // Depth 1 frontier (16 cells of size 4) IS evaluated by score_fn,
         // but each child would be size 2 < min 4, so no new frontier.

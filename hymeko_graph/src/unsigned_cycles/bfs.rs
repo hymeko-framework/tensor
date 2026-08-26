@@ -43,8 +43,12 @@ pub fn bfs_distances_into(
     while !frontier.is_empty() && d < max_dist {
         for &u in frontier.iter() {
             for &w in neighbours(row_ptr, col_idx, u) {
-                if w < start { continue; }
-                if dist[w as usize] != u8::MAX { continue; }
+                if w < start {
+                    continue;
+                }
+                if dist[w as usize] != u8::MAX {
+                    continue;
+                }
                 dist[w as usize] = d + 1;
                 next.push(w);
             }
@@ -54,4 +58,3 @@ pub fn bfs_distances_into(
         d += 1;
     }
 }
-

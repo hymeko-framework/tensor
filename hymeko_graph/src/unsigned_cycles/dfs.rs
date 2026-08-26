@@ -28,16 +28,25 @@ pub fn dfs_recurse(
     let max_remaining = (k - path.len()) as u8;
     let prune = !dist.is_empty();
     for &nxt in neighbours(row_ptr, col_idx, tail) {
-        if nxt < start { continue; }
-        if bs_get(visited, nxt) { continue; }
-        if prune && dist[nxt as usize] > max_remaining { continue; }
+        if nxt < start {
+            continue;
+        }
+        if bs_get(visited, nxt) {
+            continue;
+        }
+        if prune && dist[nxt as usize] > max_remaining {
+            continue;
+        }
         path.push(nxt);
         bs_set(visited, nxt);
-        let cont = dfs_recurse(row_ptr, col_idx, start, k, directed,
-                                 path, visited, dist, sink);
+        let cont = dfs_recurse(
+            row_ptr, col_idx, start, k, directed, path, visited, dist, sink,
+        );
         path.pop();
         bs_clear(visited, nxt);
-        if !cont { return false; }
+        if !cont {
+            return false;
+        }
     }
     true
 }
@@ -65,8 +74,9 @@ pub fn dfs_from(
     // smallest-vertex root. No tiebreak needed.
     path.push(start);
     bs_set(visited, start);
-    let cont = dfs_recurse(row_ptr, col_idx, start, k, directed,
-                             path, visited, dist, sink);
+    let cont = dfs_recurse(
+        row_ptr, col_idx, start, k, directed, path, visited, dist, sink,
+    );
     path.pop();
     bs_clear(visited, start);
     cont
@@ -100,11 +110,16 @@ pub fn dfs_from_pair(
         if has_edge(row_ptr, col_idx, last, start) {
             if directed || path[1] < path[k - 1] {
                 sink.offer(path)
-            } else { true }
-        } else { true }
+            } else {
+                true
+            }
+        } else {
+            true
+        }
     } else {
-        dfs_recurse(row_ptr, col_idx, start, k, directed,
-                      path, visited, dist, sink)
+        dfs_recurse(
+            row_ptr, col_idx, start, k, directed, path, visited, dist, sink,
+        )
     };
 
     bs_clear(visited, first_hop);
@@ -113,4 +128,3 @@ pub fn dfs_from_pair(
     path.pop();
     cont
 }
-

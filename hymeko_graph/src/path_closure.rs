@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cycle_sampler::{
-    canonical_cycle, enumerate_par, lcg_for_batch, CycleSampler, SamplerScratch,
+    CycleSampler, SamplerScratch, canonical_cycle, enumerate_par, lcg_for_batch,
 };
 use crate::rand_lcg::Lcg;
 use crate::unsigned_cycles::{build_csr, has_edge, neighbours};
@@ -76,8 +76,11 @@ pub fn enumerate_path_closure(
     max_attempts: Option<usize>,
     n_threads: Option<usize>,
 ) -> Vec<u32> {
-    let edges: Vec<(u32, u32)> =
-        edges_u.iter().copied().zip(edges_v.iter().copied()).collect();
+    let edges: Vec<(u32, u32)> = edges_u
+        .iter()
+        .copied()
+        .zip(edges_v.iter().copied())
+        .collect();
     let (row_ptr, col_idx) = build_csr(&edges, n_nodes, false);
 
     let max_att = max_attempts
@@ -95,7 +98,15 @@ pub fn enumerate_path_closure(
         chunk_size,
         max_attempts: max_att,
     };
-    enumerate_par(&sampler, n_nodes, k, target_cycles, n_batches, seed, n_threads)
+    enumerate_par(
+        &sampler,
+        n_nodes,
+        k,
+        target_cycles,
+        n_batches,
+        seed,
+        n_threads,
+    )
 }
 
 /// One walk attempt — Some(canonical) on closure, None on dead-end / revisit

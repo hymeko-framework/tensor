@@ -22,8 +22,8 @@
 use std::collections::HashSet;
 
 use hymeko_graph::incidence::{
-    build_edge_incidence, build_edge_incidence_vertex_adj, BuildOpts, IncidenceCoo,
-    IncidenceOutput, IncidenceResult,
+    BuildOpts, IncidenceCoo, IncidenceOutput, IncidenceResult, build_edge_incidence,
+    build_edge_incidence_vertex_adj,
 };
 use hymeko_graph::rand_lcg::Lcg;
 
@@ -95,9 +95,7 @@ fn build_fixture(seed: u64, n_vertices: u32, n_tuples: u32) -> Fixture {
             .last()
             .copied()
             .zip(Some(csr_row_ptr[cur_v as usize]))
-            .map(|(last, start)| {
-                csr_col_idx.len() as u32 > start && last == t
-            })
+            .map(|(last, start)| csr_col_idx.len() as u32 > start && last == t)
             .unwrap_or(false)
         {
             continue;
@@ -162,8 +160,7 @@ fn build_fixture(seed: u64, n_vertices: u32, n_tuples: u32) -> Fixture {
 /// uniform `1 / |N|` weight.  This is the protocol authority that
 /// every fast path must agree with.
 fn brute_force(fix: &Fixture) -> IncidenceCoo {
-    let mut self_map: std::collections::HashMap<(u32, u32), u32> =
-        std::collections::HashMap::new();
+    let mut self_map: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
     for i in 0..fix.self_keys_u.len() {
         self_map.insert(
             (fix.self_keys_u[i], fix.self_keys_v[i]),
@@ -247,9 +244,9 @@ fn assert_parity(actual: &IncidenceCoo, reference: &IncidenceCoo) {
     );
 
     for (row, ref_entries) in &r {
-        let act_entries = a.get(row).unwrap_or_else(|| {
-            panic!("row {} present in reference but absent in actual", row)
-        });
+        let act_entries = a
+            .get(row)
+            .unwrap_or_else(|| panic!("row {} present in reference but absent in actual", row));
         assert_eq!(
             act_entries.len(),
             ref_entries.len(),
@@ -291,7 +288,10 @@ fn parity_small_graph_against_brute_force() {
     let reference = brute_force(&fix);
     assert_parity(&actual, &reference);
     // Sanity: non-empty result.
-    assert!(!actual.rows.is_empty(), "fixture too small: no rows emitted");
+    assert!(
+        !actual.rows.is_empty(),
+        "fixture too small: no rows emitted"
+    );
 }
 
 #[test]
@@ -381,7 +381,11 @@ fn call_with_opts(fix: &Fixture, opts: BuildOpts) -> IncidenceCoo {
     .expect("dispatch returns ok")
     {
         IncidenceResult::Coo(coo) => coo,
-        IncidenceResult::Csr { row_ptr, cols, vals } => {
+        IncidenceResult::Csr {
+            row_ptr,
+            cols,
+            vals,
+        } => {
             // Re-expand CSR → COO so the parity helper can compare.
             let mut rows: Vec<u32> = Vec::with_capacity(cols.len());
             for ei in 0..(row_ptr.len() - 1) {
@@ -401,7 +405,10 @@ fn parity_parallel_matches_brute_force_mid_graph() {
     let fix = build_fixture(0x5EEDED, 200, 3500);
     let actual = call_with_opts(
         &fix,
-        BuildOpts { parallel: true, ..BuildOpts::default() },
+        BuildOpts {
+            parallel: true,
+            ..BuildOpts::default()
+        },
     );
     let reference = brute_force(&fix);
     assert_parity(&actual, &reference);
@@ -508,10 +515,18 @@ fn parallel_path_preserves_row_order() {
     let fix = build_fixture(0x5EEDED, 200, 3500);
     let parallel = call_with_opts(
         &fix,
-        BuildOpts { parallel: true, ..BuildOpts::default() },
+        BuildOpts {
+            parallel: true,
+            ..BuildOpts::default()
+        },
     );
     for w in parallel.rows.windows(2) {
-        assert!(w[0] <= w[1], "parallel row order broken at {} {}", w[0], w[1]);
+        assert!(
+            w[0] <= w[1],
+            "parallel row order broken at {} {}",
+            w[0],
+            w[1]
+        );
     }
 }
 

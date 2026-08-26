@@ -13,9 +13,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use hymeko_graph::incidence::{
-    build_edge_incidence, BuildOpts, IncidenceOutput,
-};
+use hymeko_graph::incidence::{BuildOpts, IncidenceOutput, build_edge_incidence};
 use hymeko_graph::rand_lcg::Lcg;
 
 struct Fixture {
@@ -35,9 +33,13 @@ fn build_fixture(seed: u64, n_vertices: u32, n_tuples: u32) -> Fixture {
     while (tuples.len() as u32) < n_tuples {
         let a = rng.next_in_range(n_vertices);
         let b = rng.next_in_range(n_vertices);
-        if a == b { continue; }
+        if a == b {
+            continue;
+        }
         let key = if a < b { (a, b) } else { (b, a) };
-        if seen.insert(key) { tuples.push((a, b)); }
+        if seen.insert(key) {
+            tuples.push((a, b));
+        }
     }
 
     let mut flat: Vec<(u32, u32)> = Vec::with_capacity(tuples.len() * 2);
@@ -72,7 +74,9 @@ fn build_fixture(seed: u64, n_vertices: u32, n_tuples: u32) -> Fixture {
     while (edges_u.len() as u32) < n_queries {
         let u = rng.next_in_range(n_vertices);
         let v = rng.next_in_range(n_vertices);
-        if u == v { continue; }
+        if u == v {
+            continue;
+        }
         let key = if u < v { (u, v) } else { (v, u) };
         if q_seen.insert(key) {
             edges_u.push(u);
@@ -117,7 +121,8 @@ fn bench_one_size(c: &mut Criterion, label: &str, n_vertices: u32, n_tuples: u32
                 black_box(&fix.self_keys_v),
                 black_box(&fix.self_tuple_idx),
                 BuildOpts::default(),
-            ).unwrap();
+            )
+            .unwrap();
             black_box(r)
         });
     });
@@ -132,8 +137,12 @@ fn bench_one_size(c: &mut Criterion, label: &str, n_vertices: u32, n_tuples: u32
                 black_box(&fix.self_keys_u),
                 black_box(&fix.self_keys_v),
                 black_box(&fix.self_tuple_idx),
-                BuildOpts { parallel: true, ..BuildOpts::default() },
-            ).unwrap();
+                BuildOpts {
+                    parallel: true,
+                    ..BuildOpts::default()
+                },
+            )
+            .unwrap();
             black_box(r)
         });
     });
@@ -154,7 +163,8 @@ fn bench_one_size(c: &mut Criterion, label: &str, n_vertices: u32, n_tuples: u32
                     bitset_threshold: bt,
                     ..BuildOpts::default()
                 },
-            ).unwrap();
+            )
+            .unwrap();
             black_box(r)
         });
     });
@@ -174,7 +184,8 @@ fn bench_one_size(c: &mut Criterion, label: &str, n_vertices: u32, n_tuples: u32
                     bitset_threshold: bt,
                     ..BuildOpts::default()
                 },
-            ).unwrap();
+            )
+            .unwrap();
             black_box(r)
         });
     });
@@ -194,7 +205,8 @@ fn bench_one_size(c: &mut Criterion, label: &str, n_vertices: u32, n_tuples: u32
                     output: IncidenceOutput::Csr,
                     ..BuildOpts::default()
                 },
-            ).unwrap();
+            )
+            .unwrap();
             black_box(r)
         });
     });
@@ -207,8 +219,8 @@ fn bench_incidence(c: &mut Criterion) {
     //   small  — 200 V × 3.5k T  (Bitcoin Alpha k=4 shape)
     //   mid    — 1k V × 25k T    (Bitcoin OTC k=4)
     //   large  — 4k V × 100k T   (Slashdot k=4 shape, scaled to fit CI)
-    bench_one_size(c, "small",  200,   3_500);
-    bench_one_size(c, "mid",   1_000, 25_000);
+    bench_one_size(c, "small", 200, 3_500);
+    bench_one_size(c, "mid", 1_000, 25_000);
     bench_one_size(c, "large", 4_000, 100_000);
 }
 

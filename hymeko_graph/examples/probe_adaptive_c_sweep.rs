@@ -37,9 +37,7 @@ use hymeko_graph::{
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 5 {
-        eprintln!(
-            "usage: probe_adaptive_c_sweep <edge-file> <k_len> <m_max> <c_1> [<c_2> ...]"
-        );
+        eprintln!("usage: probe_adaptive_c_sweep <edge-file> <k_len> <m_max> <c_1> [<c_2> ...]");
         std::process::exit(1);
     }
     let path = &args[1];
@@ -63,7 +61,15 @@ fn main() {
     println!("─── Adaptive c-sweep on Epinions k={k_len} balance pruner ───");
     println!(
         "  {:>5}  {:>6}  {:>9}  {:>9}  {:>10}  {:>9}  {:>9}  {:>9}  {:>9}",
-        "c", "wall_s", "cycles", "covered_v", "full_rate", "score_0", "score_0.5", "score_1.0", "mean_score",
+        "c",
+        "wall_s",
+        "cycles",
+        "covered_v",
+        "full_rate",
+        "score_0",
+        "score_0.5",
+        "score_1.0",
+        "mean_score",
     );
 
     for &c in &cs {

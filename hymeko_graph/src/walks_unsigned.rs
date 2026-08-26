@@ -5,9 +5,7 @@
 //!
 //! Moved out of `hymeko_py/src/cycles.rs` 2026-05-11 per CLAUDE.md §6.5 #2.
 
-use crate::unsigned_cycles::{
-    bs_clear, bs_get, bs_set, bs_words, build_csr, neighbours, Sink,
-};
+use crate::unsigned_cycles::{Sink, bs_clear, bs_get, bs_set, bs_words, build_csr, neighbours};
 
 /// Enumerate all simple length-`walk_len` walks in an undirected graph,
 /// dedup'd by canonical orientation (`path[0] <= path[walk_len]`).
@@ -25,8 +23,11 @@ pub fn enumerate_walks(
     if walk_len == 0 {
         return Vec::new();
     }
-    let edges: Vec<(u32, u32)> =
-        edges_u.iter().copied().zip(edges_v.iter().copied()).collect();
+    let edges: Vec<(u32, u32)> = edges_u
+        .iter()
+        .copied()
+        .zip(edges_v.iter().copied())
+        .collect();
     let (row_ptr, col_idx) = build_csr(&edges, n_nodes, false);
 
     let mut sink = match max_walks {

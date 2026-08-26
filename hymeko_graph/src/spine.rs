@@ -84,7 +84,8 @@ impl SignedCycleFIR {
     /// New from explicit coefficients. Panics if lengths mismatch.
     pub fn new(coef_pos: Vec<f32>, coef_neg: Vec<f32>) -> Self {
         assert_eq!(
-            coef_pos.len(), coef_neg.len(),
+            coef_pos.len(),
+            coef_neg.len(),
             "coef_pos and coef_neg must have equal length",
         );
         Self { coef_pos, coef_neg }
@@ -119,8 +120,7 @@ unsafe fn fir_one_cycle_avx2(
     out: &mut [f32],
 ) {
     use std::arch::x86_64::{
-        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_set1_ps,
-        _mm256_setzero_ps, _mm256_storeu_ps,
+        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_set1_ps, _mm256_setzero_ps, _mm256_storeu_ps,
     };
     let k = cycles_slice.len();
     let d_vec = (d / 8) * 8;
@@ -147,7 +147,11 @@ unsafe fn fir_one_cycle_avx2(
             for i in 0..k {
                 let v = cycles_slice[i] as usize;
                 let s = signs_slice[i];
-                let coef = if s > 0 { fir.coef_pos[i] } else { fir.coef_neg[i] };
+                let coef = if s > 0 {
+                    fir.coef_pos[i]
+                } else {
+                    fir.coef_neg[i]
+                };
                 let f_ptr = features.as_ptr().add(v * d + j);
                 let f = _mm256_loadu_ps(f_ptr);
                 let c = _mm256_set1_ps(coef);
@@ -163,7 +167,11 @@ unsafe fn fir_one_cycle_avx2(
         for i in 0..k {
             let v = cycles_slice[i] as usize;
             let s = signs_slice[i];
-            let coef = if s > 0 { fir.coef_pos[i] } else { fir.coef_neg[i] };
+            let coef = if s > 0 {
+                fir.coef_pos[i]
+            } else {
+                fir.coef_neg[i]
+            };
             a += coef * features[v * d + j];
         }
         out[j] += a;
@@ -200,8 +208,11 @@ pub fn fir_cycle_forward(
     let k = batch.k;
     let n_cycles = batch.len();
     assert_eq!(fir.k(), k, "fir.k() must match batch.k");
-    assert_eq!(features.len(), n_vertices * d,
-                "features length must equal n_vertices * d");
+    assert_eq!(
+        features.len(),
+        n_vertices * d,
+        "features length must equal n_vertices * d"
+    );
     if n_cycles == 0 {
         return Vec::new();
     }
@@ -210,36 +221,31 @@ pub fn fir_cycle_forward(
     // by every parallel chunk. is_x86_feature_detected! caches its
     // result via a static OnceCell.
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = std::is_x86_feature_detected!("avx2")
-        && std::is_x86_feature_detected!("fma");
+    let use_avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx2 = false;
 
-    out.par_chunks_mut(d).enumerate().for_each(|(ci, out_slice)| {
-        let c_start = ci * k;
-        let s_start = ci * k;
-        let cycles_slice = &batch.cycles[c_start..c_start + k];
-        let signs_slice = &batch.signs[s_start..s_start + k];
-        if use_avx2 {
-            // SAFETY: feature-gated by runtime detection above; the
-            // function body is annotated #[target_feature(enable=avx2,fma)].
-            #[cfg(target_arch = "x86_64")]
-            #[allow(unsafe_code)]
-            unsafe {
-                fir_one_cycle_avx2(
-                    cycles_slice, signs_slice, features, d, fir, out_slice,
-                );
+    out.par_chunks_mut(d)
+        .enumerate()
+        .for_each(|(ci, out_slice)| {
+            let c_start = ci * k;
+            let s_start = ci * k;
+            let cycles_slice = &batch.cycles[c_start..c_start + k];
+            let signs_slice = &batch.signs[s_start..s_start + k];
+            if use_avx2 {
+                // SAFETY: feature-gated by runtime detection above; the
+                // function body is annotated #[target_feature(enable=avx2,fma)].
+                #[cfg(target_arch = "x86_64")]
+                #[allow(unsafe_code)]
+                unsafe {
+                    fir_one_cycle_avx2(cycles_slice, signs_slice, features, d, fir, out_slice);
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                fir_one_cycle_scalar(cycles_slice, signs_slice, features, d, fir, out_slice);
+            } else {
+                fir_one_cycle_scalar(cycles_slice, signs_slice, features, d, fir, out_slice);
             }
-            #[cfg(not(target_arch = "x86_64"))]
-            fir_one_cycle_scalar(
-                cycles_slice, signs_slice, features, d, fir, out_slice,
-            );
-        } else {
-            fir_one_cycle_scalar(
-                cycles_slice, signs_slice, features, d, fir, out_slice,
-            );
-        }
-    });
+        });
     out
 }
 
@@ -257,7 +263,11 @@ fn fir_one_cycle_scalar(
     for i in 0..k {
         let v = cycles_slice[i] as usize;
         let s = signs_slice[i];
-        let coef = if s > 0 { fir.coef_pos[i] } else { fir.coef_neg[i] };
+        let coef = if s > 0 {
+            fir.coef_pos[i]
+        } else {
+            fir.coef_neg[i]
+        };
         let f_start = v * d;
         let f_slice = &features[f_start..f_start + d];
         for j in 0..d {
@@ -338,26 +348,37 @@ pub struct CliffordFIR {
 impl CliffordFIR {
     /// New Clifford filter from explicit grade-decomposed coefficients.
     pub fn new(a: Vec<f32>, b: Vec<f32>) -> Self {
-        assert_eq!(a.len(), b.len(),
-                    "a and b (scalar/pseudoscalar) banks must have equal length");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "a and b (scalar/pseudoscalar) banks must have equal length"
+        );
         Self { a, b }
     }
 
     /// Mean-pool (both branches scalar 1/k).
     pub fn mean_pool(k: usize) -> Self {
         let v = 1.0 / k as f32;
-        Self { a: vec![v; k], b: vec![v; k] }
+        Self {
+            a: vec![v; k],
+            b: vec![v; k],
+        }
     }
 
     /// Sign-aware mean: scalar grade = +1/k, pseudoscalar = -1/k.
     /// Equivalent to the SignedCycleFIR::signed_mean baseline.
     pub fn signed_mean(k: usize) -> Self {
         let v = 1.0 / k as f32;
-        Self { a: vec![v; k], b: vec![-v; k] }
+        Self {
+            a: vec![v; k],
+            b: vec![-v; k],
+        }
     }
 
     /// Filter length.
-    pub fn k(&self) -> usize { self.a.len() }
+    pub fn k(&self) -> usize {
+        self.a.len()
+    }
 
     /// Gradient buffer of zeros, shape-matching this filter.
     pub fn zero_grad(&self) -> CliffordFIR {
@@ -588,7 +609,10 @@ pub fn clifford_fir_backward_with(
     }
     FirBackward {
         grad_features,
-        grad_fir: CliffordFIR { a: grad_a, b: grad_b },
+        grad_fir: CliffordFIR {
+            a: grad_a,
+            b: grad_b,
+        },
     }
 }
 
@@ -675,7 +699,9 @@ mod tests {
         // out[0] = 0.5*1 + 0.1*2 + 0.5*3 = 2.2
         let batch = make_batch(vec![0, 1, 2], vec![1, -1, 1], 3);
         let mut features = vec![0.0; 3];
-        features[0] = 1.0; features[1] = 2.0; features[2] = 3.0;
+        features[0] = 1.0;
+        features[1] = 2.0;
+        features[2] = 3.0;
         let fir = SignedCycleFIR::new(vec![0.5; 3], vec![0.1; 3]);
         let out = fir_cycle_forward(&batch, &features, 3, 1, &fir);
         assert!((out[0] - 2.2).abs() < 1e-6, "out={:?}", out);
@@ -686,11 +712,7 @@ mod tests {
         // Cycles (0,1,2) and (0,3,4) both touch vertex 0.
         // mean_pool, features all ones → per_cycle = (1, 1).
         // Vertex 0 sees both cycles; mean = 1.
-        let batch = make_batch(
-            vec![0, 1, 2, 0, 3, 4],
-            vec![1, 1, 1, 1, 1, 1],
-            3,
-        );
+        let batch = make_batch(vec![0, 1, 2, 0, 3, 4], vec![1, 1, 1, 1, 1, 1], 3);
         let features = vec![1.0; 5];
         let fir = SignedCycleFIR::mean_pool(3);
         let out = fir_cycle_scatter_mean(&batch, &features, 5, 1, &fir);
@@ -735,56 +757,72 @@ mod tests {
         let features: Vec<f32> = (0..n_vertices * d)
             .map(|i| (i as f32) * 0.13 - 0.5)
             .collect();
-        let fir = CliffordFIR::new(
-            vec![0.7, -0.2, 0.5], vec![-0.3, 0.4, -0.1],
-        );
+        let fir = CliffordFIR::new(vec![0.7, -0.2, 0.5], vec![-0.3, 0.4, -0.1]);
         // Use a simple scalar loss L = sum(forward output).  Then
         // grad_out = ones, and the closed-form backward gives the
         // gradient of L w.r.t. params + features directly.
         let out = clifford_fir_forward(&batch, &features, n_vertices, d, &fir);
         let n_cycles = out.len() / d;
         let grad_out = vec![1.0f32; n_cycles * d];
-        let (analytic_gf, analytic_gfir) = clifford_fir_backward(
-            &batch, &features, n_vertices, d, &fir, &grad_out,
-        );
+        let (analytic_gf, analytic_gfir) =
+            clifford_fir_backward(&batch, &features, n_vertices, d, &fir, &grad_out);
 
         // Loss closure for numerical diff.
         let loss = |feats: &[f32], a: &[f32], b: &[f32]| -> f32 {
             let f = CliffordFIR::new(a.to_vec(), b.to_vec());
             clifford_fir_forward(&batch, feats, n_vertices, d, &f)
-                .iter().sum::<f32>()
+                .iter()
+                .sum::<f32>()
         };
         let eps = 1e-3f32;
 
         // Check ∂L/∂fir.a numerically.
         for i in 0..fir.k() {
-            let mut a_p = fir.a.clone(); a_p[i] += eps;
-            let mut a_m = fir.a.clone(); a_m[i] -= eps;
-            let num = (loss(&features, &a_p, &fir.b)
-                       - loss(&features, &a_m, &fir.b)) / (2.0 * eps);
-            assert!((analytic_gfir.a[i] - num).abs() < 1e-2,
-                "a[{}]: analytic={} numerical={}", i, analytic_gfir.a[i], num);
+            let mut a_p = fir.a.clone();
+            a_p[i] += eps;
+            let mut a_m = fir.a.clone();
+            a_m[i] -= eps;
+            let num = (loss(&features, &a_p, &fir.b) - loss(&features, &a_m, &fir.b)) / (2.0 * eps);
+            assert!(
+                (analytic_gfir.a[i] - num).abs() < 1e-2,
+                "a[{}]: analytic={} numerical={}",
+                i,
+                analytic_gfir.a[i],
+                num
+            );
         }
         // ∂L/∂fir.b
         for i in 0..fir.k() {
-            let mut b_p = fir.b.clone(); b_p[i] += eps;
-            let mut b_m = fir.b.clone(); b_m[i] -= eps;
-            let num = (loss(&features, &fir.a, &b_p)
-                       - loss(&features, &fir.a, &b_m)) / (2.0 * eps);
-            assert!((analytic_gfir.b[i] - num).abs() < 1e-2,
-                "b[{}]: analytic={} numerical={}", i, analytic_gfir.b[i], num);
+            let mut b_p = fir.b.clone();
+            b_p[i] += eps;
+            let mut b_m = fir.b.clone();
+            b_m[i] -= eps;
+            let num = (loss(&features, &fir.a, &b_p) - loss(&features, &fir.a, &b_m)) / (2.0 * eps);
+            assert!(
+                (analytic_gfir.b[i] - num).abs() < 1e-2,
+                "b[{}]: analytic={} numerical={}",
+                i,
+                analytic_gfir.b[i],
+                num
+            );
         }
         // Check ∂L/∂X at a few feature positions.
         for v in 0..n_vertices {
             for j in 0..d {
                 let idx = v * d + j;
-                let mut f_p = features.clone(); f_p[idx] += eps;
-                let mut f_m = features.clone(); f_m[idx] -= eps;
-                let num = (loss(&f_p, &fir.a, &fir.b)
-                           - loss(&f_m, &fir.a, &fir.b)) / (2.0 * eps);
-                assert!((analytic_gf[idx] - num).abs() < 1e-2,
+                let mut f_p = features.clone();
+                f_p[idx] += eps;
+                let mut f_m = features.clone();
+                f_m[idx] -= eps;
+                let num = (loss(&f_p, &fir.a, &fir.b) - loss(&f_m, &fir.a, &fir.b)) / (2.0 * eps);
+                assert!(
+                    (analytic_gf[idx] - num).abs() < 1e-2,
                     "X[{},{}]: analytic={} numerical={}",
-                    v, j, analytic_gf[idx], num);
+                    v,
+                    j,
+                    analytic_gf[idx],
+                    num
+                );
             }
         }
     }
@@ -816,9 +854,7 @@ mod tests {
         }
         let batch = make_batch(cycles, signs, 3);
         let features: Vec<f32> = (0..50 * 8).map(|i| (i as f32) / 50.0).collect();
-        let fir = SignedCycleFIR::new(
-            vec![0.7, -0.2, 0.5], vec![-0.3, 0.4, -0.1],
-        );
+        let fir = SignedCycleFIR::new(vec![0.7, -0.2, 0.5], vec![-0.3, 0.4, -0.1]);
         let out1 = fir_cycle_forward(&batch, &features, 50, 8, &fir);
         let out2 = fir_cycle_forward(&batch, &features, 50, 8, &fir);
         for (a, b) in out1.iter().zip(out2.iter()) {
@@ -829,7 +865,14 @@ mod tests {
     // ── GradRequest (added 2026-08-16) ────────────────────────────────────────
 
     /// Deterministic fixture large enough to span several worker chunks.
-    fn grad_fixture() -> (TopKCyclesBatch, Vec<f32>, CliffordFIR, Vec<f32>, usize, usize) {
+    fn grad_fixture() -> (
+        TopKCyclesBatch,
+        Vec<f32>,
+        CliffordFIR,
+        Vec<f32>,
+        usize,
+        usize,
+    ) {
         const N_VERTICES: usize = 64;
         const D: usize = 8;
         const K: usize = 3;
@@ -855,14 +898,25 @@ mod tests {
     #[test]
     fn params_only_matches_full_bit_exactly() {
         let (batch, features, fir, grad_out, n, d) = grad_fixture();
-        let full = clifford_fir_backward_with(
-            &batch, &features, n, d, &fir, &grad_out, GradRequest::Full,
-        );
+        let full =
+            clifford_fir_backward_with(&batch, &features, n, d, &fir, &grad_out, GradRequest::Full);
         let lean = clifford_fir_backward_with(
-            &batch, &features, n, d, &fir, &grad_out, GradRequest::ParamsOnly,
+            &batch,
+            &features,
+            n,
+            d,
+            &fir,
+            &grad_out,
+            GradRequest::ParamsOnly,
         );
-        assert_eq!(lean.grad_fir.a, full.grad_fir.a, "∇a diverged between modes");
-        assert_eq!(lean.grad_fir.b, full.grad_fir.b, "∇b diverged between modes");
+        assert_eq!(
+            lean.grad_fir.a, full.grad_fir.a,
+            "∇a diverged between modes"
+        );
+        assert_eq!(
+            lean.grad_fir.b, full.grad_fir.b,
+            "∇b diverged between modes"
+        );
     }
 
     /// The lean mode must not hand back a feature gradient at all — an empty
@@ -871,7 +925,13 @@ mod tests {
     fn params_only_yields_no_feature_gradient() {
         let (batch, features, fir, grad_out, n, d) = grad_fixture();
         let lean = clifford_fir_backward_with(
-            &batch, &features, n, d, &fir, &grad_out, GradRequest::ParamsOnly,
+            &batch,
+            &features,
+            n,
+            d,
+            &fir,
+            &grad_out,
+            GradRequest::ParamsOnly,
         );
         assert!(lean.grad_features.is_none());
     }
@@ -881,16 +941,18 @@ mod tests {
     #[test]
     fn full_yields_feature_gradient_and_wrapper_agrees() {
         let (batch, features, fir, grad_out, n, d) = grad_fixture();
-        let full = clifford_fir_backward_with(
-            &batch, &features, n, d, &fir, &grad_out, GradRequest::Full,
-        );
+        let full =
+            clifford_fir_backward_with(&batch, &features, n, d, &fir, &grad_out, GradRequest::Full);
         let gf = full.grad_features.clone().expect("Full yields ∇X");
         assert_eq!(gf.len(), n * d);
         assert!(gf.iter().any(|v| v.abs() > 1e-9), "∇X is entirely zero");
 
         let (gf_legacy, fir_legacy) =
             clifford_fir_backward(&batch, &features, n, d, &fir, &grad_out);
-        assert_eq!(gf_legacy, gf, "legacy wrapper diverged from GradRequest::Full");
+        assert_eq!(
+            gf_legacy, gf,
+            "legacy wrapper diverged from GradRequest::Full"
+        );
         assert_eq!(fir_legacy.a, full.grad_fir.a);
         assert_eq!(fir_legacy.b, full.grad_fir.b);
     }
@@ -904,7 +966,13 @@ mod tests {
         let fir = CliffordFIR::signed_mean(3);
         let grad_out = vec![0.5f32; 4];
         let out = clifford_fir_backward_with(
-            &batch, &features, 3, 4, &fir, &grad_out, GradRequest::ParamsOnly,
+            &batch,
+            &features,
+            3,
+            4,
+            &fir,
+            &grad_out,
+            GradRequest::ParamsOnly,
         );
         assert_eq!(out.grad_fir.a.len(), 3);
         assert!(out.grad_fir.a.iter().all(|v| v.is_finite()));
