@@ -153,9 +153,18 @@ impl SignedGraph {
     /// - For every undirected input edge `(u, v, s)` with `u != v`,
     ///   both `(u → v, s)` and `(v → u, s)` appear in the CSR.
     /// - Within each row, neighbour ids are sorted and deduplicated;
-    ///   on duplicate `(u, v)` input edges the **first** sign in
-    ///   sorted-by-column order survives (matches the behaviour of
-    ///   [`Self::build_csr`] on the column side).
+    ///   on duplicate `(u, v)` input edges the **last** sign in input
+    ///   order survives, matching [`Self::build_sign_lookup`]'s
+    ///   `HashMap::insert` last-write-wins semantics.
+    ///
+    /// **Corrected 2026-08-27.** This postcondition previously said
+    /// "the **first** sign in sorted-by-column order survives", which
+    /// contradicted both the implementation (`signs_csr.push(raw_signs[perm[g - 1]])`
+    /// takes the LAST index of each duplicate group) and the inline
+    /// comment ten lines below it, which has always said last-write.
+    /// The code was right; only the rustdoc was wrong. On a graph with
+    /// no parallel edges the two readings coincide, which is why it
+    /// survived — see `duplicate_edges_take_the_last_sign_not_the_first`.
     ///
     /// Profiling (Epinions $k{=}4$, $m{=}128$, balance pruner)
     /// showed `build_sign_lookup` + per-edge HashMap hits at
@@ -225,6 +234,25 @@ impl SignedGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The postcondition of [`SignedGraph::build_csr_with_signs`] disagreed with its own
+    /// implementation until 2026-08-27. A graph with no parallel edges cannot tell the two
+    /// readings apart, so the discriminating fixture is a pair carrying two opposite signs.
+    #[test]
+    fn duplicate_edges_take_the_last_sign_not_the_first() {
+        // (0,1) appears twice: first +1, then -1. Last-write must win.
+        let g = SignedGraph::from_parts(2, &[0, 0], &[1, 1], &[1, -1]);
+        let (row_ptr, col_idx, signs_csr) = g.build_csr_with_signs();
+        assert_eq!(row_ptr.len(), 3);
+        assert_eq!(col_idx.len(), 2, "one deduplicated neighbour per row");
+        for (k, &c) in col_idx.iter().enumerate() {
+            let _ = c;
+            assert_eq!(signs_csr[k], -1, "last-write must win, not first");
+        }
+        // And it agrees with the HashMap lookup it is documented to match.
+        let lookup = g.build_sign_lookup();
+        assert_eq!(lookup.get(&(0, 1)).copied(), Some(-1));
+    }
 
     #[test]
     fn csr_round_trip_small_triangle() {
