@@ -79,6 +79,7 @@ pub mod pruner;
 pub mod quadtree;
 pub mod rand_lcg;
 pub mod signed_graph;
+pub mod signed_tuples;
 pub mod spine;
 pub mod topk_cycles;
 pub mod topk_walks;
@@ -102,6 +103,10 @@ pub use pruner::{
     StatsSnapshot,
 };
 pub use signed_graph::{Sign, SignedGraph};
+pub use signed_tuples::{
+    enumerate_signed_tuples, EnumerationExecution, EnumerationRequest, MultiEdgeSignResolution,
+    SignResolver, SignedTupleFamily, TupleEnumeration,
+};
 pub use spine::{
     CliffordFIR, FirBackward, GradRequest, SignedCycleFIR, clifford_fir_backward,
     clifford_fir_backward_with, clifford_fir_forward, fir_cycle_forward, fir_cycle_scatter_mean,
