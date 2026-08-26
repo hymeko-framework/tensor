@@ -105,7 +105,7 @@ pub use pruner::{
 pub use signed_graph::{Sign, SignedGraph};
 pub use signed_tuples::{
     enumerate_signed_tuples, EnumerationExecution, EnumerationRequest, MultiEdgeSignResolution,
-    SignResolver, SignedTupleFamily, TupleEnumeration,
+    SignedTupleFamily, TupleEnumeration,
 };
 pub use spine::{
     CliffordFIR, FirBackward, GradRequest, SignedCycleFIR, clifford_fir_backward,

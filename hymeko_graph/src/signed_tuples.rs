@@ -19,8 +19,6 @@
 //! - Every vertex id is `< graph.n_nodes`.
 //! - `SignedGraph::signs` is parallel to `SignedGraph::edges` and holds only `-1` or `+1`.
 
-use std::collections::HashMap;
-
 use crate::signed_graph::SignedGraph;
 use crate::unsigned_cycles::enumerate_parallel;
 use crate::walks_unsigned::enumerate_walks;
@@ -75,25 +73,39 @@ impl SignedTupleFamily {
         }
     }
 
-    /// The tuple's member edges as **directed** `(from, to)` pairs, in traversal order.
+    /// The tuple's `i`-th member edge, as a **directed** `(from, to)` pair.
     ///
-    /// Directed because that is what a multi-edge resolver needs: the recovered oracle keys its
-    /// sign table on the directed pair and only falls back to the reverse orientation when the
-    /// forward one is absent (see [`MultiEdgeSignResolution`]).
+    /// Directed because that is what a multi-edge resolver needs: a sign table keyed on the
+    /// directed pair distinguishes the two orientations, and [`MultiEdgeSignResolution`] has an arm
+    /// for which that distinction is load-bearing.
+    ///
+    /// Indexed rather than collected: this is called once per member edge per tuple, and a
+    /// `Vec` per tuple is a heap allocation on the hot path of every enumeration.
     ///
     /// # Preconditions
-    /// `tuple.len() == self.arity()`.
+    /// `tuple.len() == self.arity()` and `i < self.edge_count()`.
     ///
     /// # Postconditions
-    /// Exactly [`Self::edge_count`] pairs. A cycle **wraps** (the last pair closes back to the
-    /// first); a walk does not; an edge yields its single pair.
-    pub fn member_edges(self, tuple: &[u32]) -> Vec<(u32, u32)> {
+    /// For a cycle the last index **wraps** back to vertex 0; for a walk it does not; an edge has
+    /// exactly one member edge.
+    #[inline]
+    pub fn member_edge(self, tuple: &[u32], i: usize) -> (u32, u32) {
         debug_assert_eq!(tuple.len(), self.arity(), "tuple width");
+        debug_assert!(i < self.edge_count(), "member-edge index");
         match self {
-            Self::Edge => vec![(tuple[0], tuple[1])],
-            Self::Cycle { k } => (0..k).map(|j| (tuple[j], tuple[(j + 1) % k])).collect(),
-            Self::Walk { len } => (0..len).map(|j| (tuple[j], tuple[j + 1])).collect(),
+            Self::Edge => (tuple[0], tuple[1]),
+            Self::Cycle { k } => (tuple[i], tuple[(i + 1) % k]),
+            Self::Walk { .. } => (tuple[i], tuple[i + 1]),
         }
+    }
+
+    /// The tuple's member edges, in traversal order, without allocating.
+    ///
+    /// # Postconditions
+    /// Yields exactly [`Self::edge_count`] pairs, each equal to [`Self::member_edge`] at the same
+    /// index.
+    pub fn member_edges(self, tuple: &[u32]) -> impl Iterator<Item = (u32, u32)> + '_ {
+        (0..self.edge_count()).map(move |i| self.member_edge(tuple, i))
     }
 
     /// Per-vertex signs from the tuple's edge signs.
@@ -191,10 +203,35 @@ impl MultiEdgeSignResolution {
 }
 
 /// A resolved directed-pair sign table under one [`MultiEdgeSignResolution`].
+///
+/// **Deliberately private.** [`enumerate_signed_tuples`] is the only consumer; exporting a sign
+/// table invites a second call site that resolves parallel edges its own way, which is the exact
+/// divergence this module exists to close. It becomes public when a second direct consumer is
+/// demonstrated, not before.
+///
+/// # Why sorted CSR and not a `HashMap`
+///
+/// `SignedGraph::build_csr_with_signs` exists precisely because a HashMap sign lookup was measured
+/// at ~39 % of CPU cycles in a production enumeration profile. A new resolver reaching for a
+/// `HashMap` would reintroduce that, so the two were measured against each other on a
+/// 6 000-vertex / 36 000-edge multigraph (`benches/signed_tuples_bench.rs`, criterion, 100 samples):
+///
+/// | | build | 500 000 lookups |
+/// |---|---|---|
+/// | `HashMap<(u32,u32), i8>` | 2.097 ms | 10.574 ms |
+/// | sorted CSR + binary search | 2.290 ms | **3.245 ms** |
+///
+/// Build is 9 % slower and irrelevant — it happens once per slot, against `edge_count` lookups per
+/// tuple across up to a capped hundred thousand tuples. Lookup is **3.26× faster**, so CSR is the
+/// representation.
 #[derive(Clone, Debug)]
-pub struct SignResolver {
-    directed: HashMap<(u32, u32), i8>,
-    resolution: MultiEdgeSignResolution,
+struct SignResolver {
+    /// Row offsets over the `from` vertex, length `n_nodes + 1`.
+    row_ptr: Vec<u32>,
+    /// `to` vertices, sorted and de-duplicated within each row.
+    col: Vec<u32>,
+    /// Resolved sign, aligned with `col`.
+    sign: Vec<i8>,
 }
 
 impl SignResolver {
@@ -204,62 +241,63 @@ impl SignResolver {
     /// Every entry of `visible` is a valid index into `graph.edges`.
     ///
     /// # Postconditions
-    /// [`Self::sign_of`] answers for every visible pair in **both** orientations, and for no other
+    /// [`Self::sign_of`] answers for every visible pair in **both** orientations and for no other
     /// pair. Building twice over the same inputs yields the same table.
-    pub fn build(
-        graph: &SignedGraph,
-        visible: &[u32],
-        resolution: MultiEdgeSignResolution,
-    ) -> Self {
-        let mut directed: HashMap<(u32, u32), i8> = HashMap::with_capacity(visible.len() * 2);
-        match resolution {
-            MultiEdgeSignResolution::FirstOccurrenceForwardThenReverse => {
-                // Forward pass first, then reverse: exactly the concatenation order the oracle's
-                // stable sort preserves. `or_insert` keeps the earliest of equal keys.
-                for &e in visible {
-                    let (u, v) = graph.edges[e as usize];
-                    directed.entry((u, v)).or_insert(graph.signs[e as usize]);
-                }
-                for &e in visible {
-                    let (u, v) = graph.edges[e as usize];
-                    directed.entry((v, u)).or_insert(graph.signs[e as usize]);
-                }
-            }
-            MultiEdgeSignResolution::LastWriteUnordered => {
-                // Orientation is discarded and later edges overwrite earlier ones, so both
-                // directed keys always carry the same value.
-                for &e in visible {
-                    let (u, v) = graph.edges[e as usize];
-                    let s = graph.signs[e as usize];
-                    directed.insert((u, v), s);
-                    directed.insert((v, u), s);
-                }
-            }
+    fn build(graph: &SignedGraph, visible: &[u32], resolution: MultiEdgeSignResolution) -> Self {
+        let n = graph.n_nodes as usize;
+        // `(to, priority, sign)` per `from` row. Priority encodes the resolution's tie-break:
+        // the forward pass occupies `[0, len)` and the reverse pass `[len, 2*len)`, mirroring the
+        // concatenation order a stable sort would preserve.
+        let mut rows: Vec<Vec<(u32, usize, i8)>> = vec![Vec::new(); n];
+        let span = visible.len();
+        for (rank, &e) in visible.iter().enumerate() {
+            let (u, v) = graph.edges[e as usize];
+            let s = graph.signs[e as usize];
+            rows[u as usize].push((v, rank, s));
+            rows[v as usize].push((u, span + rank, s));
         }
-        Self {
-            directed,
-            resolution,
+
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col: Vec<u32> = Vec::new();
+        let mut sign: Vec<i8> = Vec::new();
+        row_ptr.push(0u32);
+        for row in rows.iter_mut() {
+            row.sort_unstable_by_key(|&(c, p, _)| (c, p));
+            let mut j = 0;
+            while j < row.len() {
+                let c = row[j].0;
+                let start = j;
+                while j < row.len() && row[j].0 == c {
+                    j += 1;
+                }
+                col.push(c);
+                sign.push(match resolution {
+                    // Lowest priority in the group: forward ahead of reverse, lowest rank within.
+                    MultiEdgeSignResolution::FirstOccurrenceForwardThenReverse => row[start].2,
+                    // Orientation discarded and later edges overwrite earlier ones. Both halves of
+                    // the group came from the same edge set, so the highest *rank* modulo the span
+                    // is the last edge written — which is what `build_sign_lookup` computes.
+                    MultiEdgeSignResolution::LastWriteUnordered => row[start..j]
+                        .iter()
+                        .max_by_key(|&&(_, p, _)| p % span.max(1))
+                        .map(|&(_, _, s)| s)
+                        .unwrap_or(row[start].2),
+                });
+            }
+            row_ptr.push(col.len() as u32);
         }
+        Self { row_ptr, col, sign }
     }
 
     /// The resolved sign of a traversed directed pair, or `None` when the pair is not visible.
-    pub fn sign_of(&self, from: u32, to: u32) -> Option<i8> {
-        self.directed.get(&(from, to)).copied()
-    }
-
-    /// The contract this table was built under.
-    pub fn resolution(&self) -> MultiEdgeSignResolution {
-        self.resolution
-    }
-
-    /// Distinct directed pairs the table answers for.
-    pub fn len(&self) -> usize {
-        self.directed.len()
-    }
-
-    /// Whether the table is empty.
-    pub fn is_empty(&self) -> bool {
-        self.directed.is_empty()
+    #[inline]
+    fn sign_of(&self, from: u32, to: u32) -> Option<i8> {
+        let s = *self.row_ptr.get(from as usize)? as usize;
+        let e = self.row_ptr[from as usize + 1] as usize;
+        self.col[s..e]
+            .binary_search(&to)
+            .ok()
+            .map(|k| self.sign[s + k])
     }
 }
 
@@ -352,11 +390,15 @@ pub struct TupleEnumeration {
     pub member_signs: Vec<i8>,
     /// Tuples whose member edges could not all be resolved, and were therefore dropped.
     pub dropped: usize,
-    /// The request that produced this set.
+    /// The request that produced this set — what the caller **asked for**.
     pub request: EnumerationRequest,
-    /// Whether a multi-edge resolution was actually consulted. `false` for
-    /// [`SignedTupleFamily::Edge`], which is indexed by edge and keeps raw per-edge signs.
-    pub resolved_multi_edges: bool,
+    /// The execution contract that actually ran — what the caller **got**.
+    ///
+    /// Not always `request.execution`. The walk enumerator is single-threaded by construction, so a
+    /// walk family asked for [`EnumerationExecution::Rayon`] still executes serially; recording the
+    /// request alone would claim a schedule sensitivity the run never had. A reproducibility
+    /// judgement must read this field, not the request.
+    pub effective_execution: EnumerationExecution,
 }
 
 impl TupleEnumeration {
@@ -374,8 +416,17 @@ impl TupleEnumeration {
     }
 
     /// The resolution actually consulted, or `None` when the family needed none.
+    ///
+    /// Derived from the family rather than stored: [`SignedTupleFamily::Edge`] is indexed by edge
+    /// and keeps raw per-edge signs, so it consults no resolver. A stored flag could disagree with
+    /// the family it sits next to; a derivation cannot.
     pub fn resolution(&self) -> Option<MultiEdgeSignResolution> {
-        self.resolved_multi_edges.then_some(self.request.resolution)
+        (self.family != SignedTupleFamily::Edge).then_some(self.request.resolution)
+    }
+
+    /// Whether this set's sampling is reproducible, judged on the **effective** execution.
+    pub fn is_reproducible(&self) -> bool {
+        self.request.cap.is_none() || self.effective_execution.is_reproducible_under_cap()
     }
 }
 
@@ -427,11 +478,13 @@ pub fn enumerate_signed_tuples(
             member_signs,
             dropped: 0,
             request,
-            resolved_multi_edges: false,
+            // No traversal happens: the edge list is walked once, in order.
+            effective_execution: EnumerationExecution::DeterministicSerial,
         };
     }
 
     let visible_edges: Vec<(u32, u32)> = visible.iter().map(|&e| graph.edges[e as usize]).collect();
+    let mut effective_execution = execution;
     let paths: Vec<u32> = match family {
         SignedTupleFamily::Edge => unreachable!("handled above"),
         SignedTupleFamily::Cycle { k } => {
@@ -447,9 +500,10 @@ pub fn enumerate_signed_tuples(
             .into_flat()
         }
         SignedTupleFamily::Walk { len } => {
-            // The walk enumerator is single-threaded by construction, so both execution contracts
-            // reach the same code; the contract is still recorded, because a caller asking for
-            // `DeterministicSerial` must get the promise, not an accident.
+            // The walk enumerator is single-threaded by construction. A request for `Rayon` is
+            // therefore honoured as serial, and the effective contract is corrected to say so —
+            // otherwise the record would claim a schedule sensitivity this run never had.
+            effective_execution = EnumerationExecution::DeterministicSerial;
             let (us, vs): (Vec<u32>, Vec<u32>) = visible_edges.iter().copied().unzip();
             enumerate_walks(&us, &vs, n_nodes, len, cap, seed)
         }
@@ -465,7 +519,6 @@ pub fn enumerate_signed_tuples(
         }
         let edge_signs: Option<Vec<i8>> = family
             .member_edges(tuple)
-            .into_iter()
             .map(|(from, to)| resolver.sign_of(from, to))
             .collect();
         if let Some(edge_signs) = edge_signs {
@@ -480,7 +533,7 @@ pub fn enumerate_signed_tuples(
         member_signs,
         dropped: enumerated - kept,
         request,
-        resolved_multi_edges: true,
+        effective_execution,
     }
 }
 
@@ -514,7 +567,7 @@ mod tests {
             (SignedTupleFamily::Walk { len: 3 }, vec![1, 4, 2, 9]),
         ];
         for (family, tuple) in cases {
-            let edges = family.member_edges(&tuple);
+            let edges: Vec<_> = family.member_edges(&tuple).collect();
             assert_eq!(edges.len(), family.edge_count(), "{family:?}");
             let signs = family.member_signs(&vec![1i8; edges.len()]);
             assert_eq!(signs.len(), family.arity(), "{family:?}");
@@ -522,10 +575,32 @@ mod tests {
     }
 
     #[test]
+    fn the_indexed_accessor_and_the_iterator_agree_everywhere() {
+        // `member_edge` is the non-allocating primitive and `member_edges` is its iterator; a
+        // divergence between them would put signs on the wrong vertices silently.
+        for (family, tuple) in [
+            (SignedTupleFamily::Edge, vec![5u32, 2]),
+            (SignedTupleFamily::Cycle { k: 4 }, vec![3, 7, 1, 9]),
+            (SignedTupleFamily::Walk { len: 4 }, vec![2, 8, 4, 0, 6]),
+        ] {
+            let iterated: Vec<_> = family.member_edges(&tuple).collect();
+            let indexed: Vec<_> = (0..family.edge_count())
+                .map(|i| family.member_edge(&tuple, i))
+                .collect();
+            assert_eq!(iterated, indexed, "{family:?}");
+            assert_eq!(iterated.len(), family.edge_count(), "{family:?}");
+        }
+    }
+
+    #[test]
     fn a_cycle_wraps_and_a_walk_of_the_same_width_does_not() {
         let tuple = vec![3u32, 1, 4];
-        let cycle = SignedTupleFamily::Cycle { k: 3 }.member_edges(&tuple);
-        let walk = SignedTupleFamily::Walk { len: 2 }.member_edges(&tuple);
+        let cycle: Vec<_> = SignedTupleFamily::Cycle { k: 3 }
+            .member_edges(&tuple)
+            .collect();
+        let walk: Vec<_> = SignedTupleFamily::Walk { len: 2 }
+            .member_edges(&tuple)
+            .collect();
         assert_eq!(cycle, vec![(3, 1), (1, 4), (4, 3)], "directed, wrapped");
         assert_eq!(walk, vec![(3, 1), (1, 4)], "directed, open");
         assert_eq!(cycle.len(), walk.len() + 1);
@@ -539,9 +614,16 @@ mod tests {
             vec![-1, -1],
             "same width, different contract"
         );
-        assert_eq!(SignedTupleFamily::Edge.member_edges(&[9, 2]), vec![(9, 2)]);
         assert_eq!(
-            SignedTupleFamily::Cycle { k: 2 }.member_edges(&[9, 2]),
+            SignedTupleFamily::Edge
+                .member_edges(&[9, 2])
+                .collect::<Vec<_>>(),
+            vec![(9, 2)]
+        );
+        assert_eq!(
+            SignedTupleFamily::Cycle { k: 2 }
+                .member_edges(&[9, 2])
+                .collect::<Vec<_>>(),
             vec![(9, 2), (2, 9)],
             "the wrapped rule traverses the pair twice"
         );
@@ -739,21 +821,138 @@ mod tests {
         );
     }
 
-    /// Characterisation, not a wish: the parallel path is documented as sample-unstable under a
-    /// cap, and this test records what it actually does rather than changing it.
+    /// Characterisation, not a wish, and a **positive control**: the parallel path is not merely
+    /// undeclared-reproducible, it demonstrably samples differently. The assertion is that the
+    /// materialisations *differ* while the tuple counts *agree* — a difference in count would mean
+    /// the cap was broken, which is a different defect and would hide this one.
+    /// Characterisation, not a wish, and a **positive control**: the parallel path is not merely
+    /// undeclared-reproducible, it demonstrably samples differently. The assertion is that the
+    /// materialisations *differ* while the tuple counts *agree* — a difference in count would mean
+    /// the cap was broken, which is a different defect and would hide this one.
     #[test]
     fn rayon_execution_is_not_sample_stable_under_a_cap() {
-        let g = dense_ring(40);
-        let serial = materialise(&g, EnumerationExecution::DeterministicSerial, 200);
-        let parallel = materialise(&g, EnumerationExecution::Rayon { threads: Some(4) }, 200);
-        // Both honour the cap and produce well-formed tuples...
-        assert_eq!(parallel.0.len(), parallel.1.len());
-        assert_eq!(parallel.0.len() % 4, 0);
-        // ...but the contract flags only one of them as reproducible, and that flag is what a
-        // caller must consult.
+        let g = dense_ring(160);
+        // The cap must actually sample. Measure the pool first and take half of it: a cap close to
+        // the pool size leaves too little freedom for the schedules to disagree, and an earlier
+        // version of this test passed vacuously at 71 % of the pool for exactly that reason.
+        let pool = enumerate_signed_tuples(
+            &g,
+            &all_edges(&g),
+            SignedTupleFamily::Cycle { k: 4 },
+            request(None, 7, EnumerationExecution::DeterministicSerial),
+        )
+        .len();
+        assert!(pool > 100, "fixture pool too small to sample: {pool}");
+        let cap = pool / 2;
+
+        let serial = materialise(&g, EnumerationExecution::DeterministicSerial, cap);
+        // Explicit thread counts, not the ambient pool: the control must be about the schedule,
+        // not about how many cores the test machine happens to have.
+        for threads in [2usize, 4, 8] {
+            let parallel = materialise(
+                &g,
+                EnumerationExecution::Rayon {
+                    threads: Some(threads),
+                },
+                cap,
+            );
+
+            // Counts agree — the cap is honoured identically, so what differs is the *sample*.
+            // A count mismatch would be a broken cap, a different defect that would mask this one.
+            assert_eq!(
+                serial.0.len(),
+                parallel.0.len(),
+                "threads={threads}: tuple counts must agree"
+            );
+            assert_eq!(parallel.0.len(), parallel.1.len(), "threads={threads}");
+            assert_eq!(parallel.0.len() % 4, 0, "threads={threads}");
+            assert_eq!(serial.0.len() / 4, cap, "the cap must bind");
+
+            // ...and the materialisation genuinely differs.
+            assert!(
+                serial.0 != parallel.0 || serial.1 != parallel.1,
+                "threads={threads}: produced the identical materialisation as serial — either the \
+                 fixture stopped sampling or the schedule sensitivity is gone"
+            );
+        }
+
+        // The contract flags exactly one of them, and the flag is what a caller must read.
         assert!(EnumerationExecution::DeterministicSerial.is_reproducible_under_cap());
         assert!(!EnumerationExecution::Rayon { threads: Some(4) }.is_reproducible_under_cap());
-        let _ = serial;
+        assert!(!EnumerationExecution::Rayon { threads: None }.is_reproducible_under_cap());
+    }
+
+    /// A walk family asked for `Rayon` runs serially anyway, so its **effective** contract is
+    /// corrected to `DeterministicSerial` and it is judged reproducible on that basis. Recording
+    /// the request alone would claim a schedule sensitivity the run never had.
+    #[test]
+    fn walk_enumeration_records_serial_execution_even_when_rayon_is_requested() {
+        let g = dense_ring(30);
+        let e = enumerate_signed_tuples(
+            &g,
+            &all_edges(&g),
+            SignedTupleFamily::Walk { len: 3 },
+            request(
+                Some(40),
+                5,
+                EnumerationExecution::Rayon { threads: Some(4) },
+            ),
+        );
+        assert_eq!(
+            e.request.execution,
+            EnumerationExecution::Rayon { threads: Some(4) },
+            "the request is recorded as made"
+        );
+        assert_eq!(
+            e.effective_execution,
+            EnumerationExecution::DeterministicSerial,
+            "the walk enumerator is single-threaded, so that is what actually ran"
+        );
+        assert!(
+            e.is_reproducible(),
+            "judged on effective execution, not the request"
+        );
+        // And it really is byte-stable, which is what the corrected record claims.
+        let again = enumerate_signed_tuples(
+            &g,
+            &all_edges(&g),
+            SignedTupleFamily::Walk { len: 3 },
+            request(
+                Some(40),
+                5,
+                EnumerationExecution::Rayon { threads: Some(4) },
+            ),
+        );
+        assert_eq!(e.vertices, again.vertices);
+        assert_eq!(e.member_signs, again.member_signs);
+    }
+
+    /// The `Edge` family resolves nothing, and that is derived from the family rather than stored.
+    #[test]
+    fn resolution_applicability_is_derived_from_the_family() {
+        let g = multigraph();
+        let edge = enumerate_signed_tuples(
+            &g,
+            &all_edges(&g),
+            SignedTupleFamily::Edge,
+            request(None, 0, EnumerationExecution::DeterministicSerial),
+        );
+        let cycle = enumerate_signed_tuples(
+            &g,
+            &all_edges(&g),
+            SignedTupleFamily::Cycle { k: 3 },
+            request(None, 0, EnumerationExecution::DeterministicSerial),
+        );
+        assert!(
+            edge.resolution().is_none(),
+            "indexed by edge, resolves nothing"
+        );
+        assert_eq!(
+            cycle.resolution(),
+            Some(MultiEdgeSignResolution::FirstOccurrenceForwardThenReverse)
+        );
+        // Both carry the same request; only the family differs.
+        assert_eq!(edge.request.resolution, cycle.request.resolution);
     }
 
     #[test]
