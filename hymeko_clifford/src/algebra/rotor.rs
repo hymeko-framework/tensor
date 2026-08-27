@@ -209,6 +209,144 @@ pub fn rotor_holonomy_backward(
     grad
 }
 
+// ---------------------------------------------------------------------------------------------
+// Cayley-parameterised rotor operator — the batched forward and its adjoint.
+//
+// Moved here from `nagare/src/ops/cayley_rotor.rs` on 2026-08-28 under the Phase D0 ownership
+// audit (`nagare/reports/2026-08-28-rotor-ownership-audit-d0.md`), which established that:
+//
+//   * the forward is bit-identical to a per-triple composition of this module's
+//     `cayley_to_unit_quat` and `quat_rotate` (0 differing lanes at n = 1, 3, 17), so it
+//     contributes iteration and buffer packing and no arithmetic of its own;
+//   * the backward is the quaternion-rotation Jacobian composed with the Cayley normalisation
+//     Jacobian — general Clifford/Cayley mathematics, carrying no Nagare type, no cache, no RNG
+//     and no study policy;
+//   * this crate is dependency-free, so nothing can cycle by moving into it.
+//
+// The arithmetic is unchanged: buffer shapes, loop order, accumulation order, the assertions and
+// the f32 expressions are those of the pre-move body, and
+// `tests/cayley_rotor_extraction.rs` proves it against a verbatim transcription.
+// ---------------------------------------------------------------------------------------------
+
+fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+fn grad_quat_from_rotate(q: [f32; 4], v: [f32; 3], grad_r: [f32; 3]) -> [f32; 4] {
+    let [w, x, y, z] = q;
+    let [vx, vy, vz] = v;
+    let [gx, gy, gz] = grad_r;
+
+    let grad_w = gx * (2.0 * (y * vz - z * vy))
+        + gy * (2.0 * (z * vx - x * vz))
+        + gz * (2.0 * (x * vy - y * vx));
+
+    let grad_x = gx * (2.0 * y * vy + 2.0 * z * vz)
+        + gy * (2.0 * y * vx - 4.0 * x * vy - 2.0 * w * vz)
+        + gz * (2.0 * z * vx + 2.0 * w * vy - 4.0 * x * vz);
+
+    let grad_y = gx * (-4.0 * y * vx + 2.0 * x * vy + 2.0 * w * vz)
+        + gy * (2.0 * x * vx + 2.0 * z * vz)
+        + gz * (-2.0 * w * vx + 2.0 * z * vy - 4.0 * y * vz);
+
+    let grad_z = gx * (-4.0 * z * vx - 2.0 * w * vy + 2.0 * x * vz)
+        + gy * (2.0 * w * vx - 4.0 * z * vy + 2.0 * y * vz)
+        + gz * (2.0 * x * vx + 2.0 * y * vy);
+
+    [grad_w, grad_x, grad_y, grad_z]
+}
+
+/// Forward Cayley-rotor op.
+///
+/// # Args
+/// - `bivec`: Flat `(n, 3)` Rodrigues parameters.
+/// - `v`: Flat `(n, 3)` vectors to rotate.
+/// - `n`: Number of triples.
+///
+/// # Preconditions
+/// `bivec.len() == n * 3`, `v.len() == n * 3`, and all inputs are finite.
+///
+/// # Postconditions
+/// Returns `(rotated, quats)` with shapes `(n, 3)` and `(n, 4)`. Each saved
+/// quaternion is unit length to floating-point tolerance.
+///
+/// # Panics
+/// Panics if input lengths do not match `n`.
+pub fn cayley_rotor_forward(bivec: &[f32], v: &[f32], n: usize) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(bivec.len(), n * 3);
+    assert_eq!(v.len(), n * 3);
+    let mut rotated = vec![0.0; n * 3];
+    let mut quats = vec![0.0; n * 4];
+
+    for i in 0..n {
+        let b = [bivec[i * 3], bivec[i * 3 + 1], bivec[i * 3 + 2]];
+        let vi = [v[i * 3], v[i * 3 + 1], v[i * 3 + 2]];
+        let q = cayley_to_unit_quat(b);
+        let r = quat_rotate(q, vi);
+        rotated[i * 3..i * 3 + 3].copy_from_slice(&r);
+        quats[i * 4..i * 4 + 4].copy_from_slice(&q);
+    }
+    (rotated, quats)
+}
+
+/// Backward Cayley-rotor op.
+///
+/// # Args
+/// - `bivec`: Flat `(n, 3)` Rodrigues parameters from forward.
+/// - `v`: Flat `(n, 3)` vectors from forward.
+/// - `quats`: Flat `(n, 4)` saved unit quaternions from forward.
+/// - `grad_r`: Flat `(n, 3)` incoming gradient on rotated vectors.
+/// - `n`: Number of triples.
+///
+/// # Preconditions
+/// Buffer lengths must match the documented shapes. `quats` must be the saved
+/// forward quaternions for `bivec`.
+///
+/// # Postconditions
+/// Returns `(grad_bivec, grad_v)`, both flat `(n, 3)`.
+///
+/// # Panics
+/// Panics if input lengths do not match `n`.
+pub fn cayley_rotor_backward(
+    bivec: &[f32],
+    v: &[f32],
+    quats: &[f32],
+    grad_r: &[f32],
+    n: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(bivec.len(), n * 3);
+    assert_eq!(v.len(), n * 3);
+    assert_eq!(quats.len(), n * 4);
+    assert_eq!(grad_r.len(), n * 3);
+
+    let mut grad_bivec = vec![0.0; n * 3];
+    let mut grad_v = vec![0.0; n * 3];
+
+    for i in 0..n {
+        let b = [bivec[i * 3], bivec[i * 3 + 1], bivec[i * 3 + 2]];
+        let vi = [v[i * 3], v[i * 3 + 1], v[i * 3 + 2]];
+        let q = [
+            quats[i * 4],
+            quats[i * 4 + 1],
+            quats[i * 4 + 2],
+            quats[i * 4 + 3],
+        ];
+        let gr = [grad_r[i * 3], grad_r[i * 3 + 1], grad_r[i * 3 + 2]];
+
+        let gv = quat_rotate(quat_conjugate(q), gr);
+        grad_v[i * 3..i * 3 + 3].copy_from_slice(&gv);
+
+        let grad_q = grad_quat_from_rotate(q, vi, gr);
+        let l = (1.0 + b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt();
+        let q_dot_grad = dot4(q, grad_q);
+        grad_bivec[i * 3] = (grad_q[1] - q[1] * q_dot_grad) / l;
+        grad_bivec[i * 3 + 1] = (grad_q[2] - q[2] * q_dot_grad) / l;
+        grad_bivec[i * 3 + 2] = (grad_q[3] - q[3] * q_dot_grad) / l;
+    }
+
+    (grad_bivec, grad_v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
