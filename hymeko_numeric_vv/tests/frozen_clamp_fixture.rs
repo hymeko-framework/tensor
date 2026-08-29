@@ -176,3 +176,119 @@ fn record_the_fixture() {
     std::fs::write(&path, render()).expect("write fixture");
     eprintln!("recorded {}", path.display());
 }
+
+// ── claims inherited from the retired `frozen_clamp_oracle_parity.rs` (2026-08-29) ────────────
+//
+// That suite's purpose was capture-before-deletion: it compared the frozen oracle against the
+// production `*_under(LegacyRecorded)` selector while that selector still existed. The selector is
+// gone, so fidelity-to-the-selector is now **immutable pre-deletion evidence at commit `28d4ee6`**,
+// where the suite was green — deliberately not re-asserted at runtime, because the comparand no
+// longer exists by design.
+//
+// What did NOT depend on the selector is inherited here. The frozen oracle uses only plain
+// production entry points, so these claims remain executable:
+
+/// The probe must genuinely saturate on both sides and land on both closed endpoints, or every
+/// claim built on it is vacuous.
+#[test]
+fn the_probe_actually_saturates_on_both_sides_and_hits_both_endpoints() {
+    let x = frozen::saturating_probe(N, CH);
+    assert!(x.iter().any(|&v| v < -1.0), "no low saturation");
+    assert!(x.iter().any(|&v| v > 1.0), "no high saturation");
+    assert!(x.contains(&-1.0), "closed lower endpoint not probed");
+    assert!(x.contains(&1.0), "closed upper endpoint not probed");
+    assert!(
+        x.iter()
+            .any(|&v| (-1.0..=1.0).contains(&v) && v != -1.0 && v != 1.0),
+        "no strictly-interior element to hold fixed"
+    );
+}
+
+/// The frozen and canonical arithmetics differ **exactly** on the saturated elements — nowhere
+/// else. Previously expressed as contract-vs-contract; now oracle-vs-canonical, which is the same
+/// comparison without the retired selector.
+#[test]
+fn frozen_and_canonical_differ_exactly_on_the_saturated_elements() {
+    let (c, gy) = (coef(), grad_y());
+    let x = frozen::saturating_probe(N, CH);
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
+    let frozen_gx = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
+
+    // Exact characterisation, not a floor: bit-identical at every interior coordinate, differing
+    // at EVERY saturated one. Counted by `to_bits()`, so `+0.0` vs `-0.0` cannot pass as equal.
+    let (mut interior, mut saturated, mut sat_differ) = (0usize, 0usize, 0usize);
+    for (i, &raw) in x.iter().enumerate() {
+        if (-1.0..=1.0).contains(&raw) {
+            interior += 1;
+            assert_eq!(
+                canonical[i].to_bits(),
+                frozen_gx[i].to_bits(),
+                "element {i} (raw {raw}) is interior; the two must agree bit-for-bit"
+            );
+        } else {
+            saturated += 1;
+            assert_eq!(
+                canonical[i].to_bits(),
+                0.0f32.to_bits(),
+                "element {i} (raw {raw}): canonical must be exactly +0.0"
+            );
+            if canonical[i].to_bits() != frozen_gx[i].to_bits() {
+                sat_differ += 1;
+            }
+        }
+    }
+    assert_eq!(x.len(), 21, "probe width");
+    assert_eq!(interior, 11, "interior coordinates on this probe");
+    assert_eq!(saturated, 10, "saturated coordinates on this probe");
+    assert_eq!(
+        sat_differ, 10,
+        "the two arithmetics must differ at EVERY saturated coordinate, not merely somewhere"
+    );
+}
+
+/// The same exact characterisation for Kochanek-Bartels.
+#[test]
+fn frozen_and_canonical_differ_at_every_saturated_kb_coordinate() {
+    let (c, t, gy) = (coef(), tcb_raw(), grad_y());
+    let x = frozen::saturating_probe(N, CH);
+    let (_, cache) = kb_forward(&c, &t, &x, N, CH, GRID);
+    let canonical = kb_backward(&c, &t, &cache, &gy).grad_x;
+    let frozen_gx = frozen::kb_legacy_grad_x(&c, &t, &x, N, CH, GRID, &gy);
+
+    let mut sat_differ = 0usize;
+    for (i, &raw) in x.iter().enumerate() {
+        if (-1.0..=1.0).contains(&raw) {
+            assert_eq!(
+                canonical[i].to_bits(),
+                frozen_gx[i].to_bits(),
+                "KB interior {i}"
+            );
+        } else {
+            assert_eq!(canonical[i].to_bits(), 0.0f32.to_bits(), "KB saturated {i}");
+            if canonical[i].to_bits() != frozen_gx[i].to_bits() {
+                sat_differ += 1;
+            }
+        }
+    }
+    assert_eq!(
+        sat_differ, 10,
+        "KB must differ at every saturated coordinate"
+    );
+}
+
+/// On a wholly interior input the frozen and canonical arithmetics are bit-identical.
+#[test]
+fn on_a_wholly_interior_input_frozen_and_canonical_agree() {
+    let (c, gy) = (coef(), grad_y());
+    let x: Vec<f32> = (0..N * CH)
+        .map(|i| -0.9 + 1.8 * (i as f32) / ((N * CH - 1) as f32))
+        .collect();
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
+    let frozen_gx = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
+    assert_eq!(
+        canonical.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        frozen_gx.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+}

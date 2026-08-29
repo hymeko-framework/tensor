@@ -3,7 +3,7 @@
 //! The paper's HSiKAN configures its KAN activations with **three** control points. This suite
 //! proves that `hymeko_spline`'s canonical operator reproduces the recovered
 //! `hymeko_neuro.hyperedge.splines._catmull_rom_eval` at that grid — forward, input gradient and
-//! coefficient gradient — under [`ClampGradientContract::Corrected`], which is the contract the
+//! coefficient gradient — under the canonical clamp Jacobian, which is the arithmetic the
 //! recovered evaluator implements (it clamps `x` with `torch.clamp` and lets autograd carry the
 //! zero derivative outside `[-1, 1]`).
 //!
@@ -16,8 +16,7 @@
 //! The fixture is parsed here by a purpose-built scanner rather than a JSON crate: `hymeko_spline`
 //! has no dev-dependencies, and adding one would be a core dependency change.
 
-use hymeko_spline::catmull_rom::{catmull_rom_backward_under, catmull_rom_forward};
-use hymeko_spline::clamp_contract::ClampGradientContract;
+use hymeko_spline::catmull_rom::{catmull_rom_backward, catmull_rom_forward};
 
 const FIXTURE: &str = include_str!("fixtures/coginfocom_catmull_rom_grid3.json");
 
@@ -219,12 +218,7 @@ fn grid3_matches_the_recovered_pytorch_evaluator() {
 
     for c in &cs {
         let (out, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
-        let back = catmull_rom_backward_under(
-            &c.coef,
-            &cache,
-            &c.grad_y,
-            ClampGradientContract::Corrected,
-        );
+        let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
 
         // Forward: bit identity, asserted — not a tolerance.
         for (k, (&got, &want)) in out.iter().zip(&c.y).enumerate() {
@@ -275,12 +269,7 @@ fn saturated_inputs_have_exactly_zero_corrected_input_gradient() {
     let mut saturated = 0usize;
     for c in &cs {
         let (_, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
-        let back = catmull_rom_backward_under(
-            &c.coef,
-            &cache,
-            &c.grad_y,
-            ClampGradientContract::Corrected,
-        );
+        let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
         for (k, &raw) in c.x.iter().enumerate() {
             if !(-1.0..=1.0).contains(&raw) {
                 assert_eq!(
@@ -305,12 +294,7 @@ fn endpoints_are_interior_and_the_knot_is_approached_from_both_sides() {
     let mut endpoints = 0usize;
     for c in &cs {
         let (_, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
-        let back = catmull_rom_backward_under(
-            &c.coef,
-            &cache,
-            &c.grad_y,
-            ClampGradientContract::Corrected,
-        );
+        let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
         for (k, &raw) in c.x.iter().enumerate() {
             if raw == -1.0 || raw == 1.0 {
                 assert!(
@@ -388,12 +372,7 @@ fn measure_error_distribution() {
         let mut opposite = 0usize;
         for c in cases() {
             let (out, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
-            let back = catmull_rom_backward_under(
-                &c.coef,
-                &cache,
-                &c.grad_y,
-                ClampGradientContract::Corrected,
-            );
+            let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
             let (g, w): (Vec<f32>, Vec<f32>) = match sel {
                 0 => (out, c.y.clone()),
                 1 => (back.grad_x, c.grad_x.clone()),
@@ -543,84 +522,41 @@ fn a_materially_wrong_implementation_is_rejected() {
     );
 }
 
-/// `LegacyRecorded` must still be selectable, must still differ from `Corrected` exactly where the
-/// forward saturated, and must disagree with the recovered PyTorch there — which is what makes the
-/// contract selection in the parity assertions load-bearing rather than decorative.
-#[test]
-fn the_legacy_contract_remains_selectable_and_differs_on_saturated_inputs() {
-    let mut differing = 0usize;
-    for c in cases() {
-        let (_, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
-        let corrected = catmull_rom_backward_under(
-            &c.coef,
-            &cache,
-            &c.grad_y,
-            ClampGradientContract::Corrected,
-        );
-        let legacy = catmull_rom_backward_under(
-            &c.coef,
-            &cache,
-            &c.grad_y,
-            ClampGradientContract::LegacyRecorded,
-        );
-
-        // `grad_coef` is contract-independent.
-        for (a, b) in legacy.grad_coef.iter().zip(&corrected.grad_coef) {
-            assert_eq!(
-                a.to_bits(),
-                b.to_bits(),
-                "{}: grad_coef is contract-free",
-                c.name
-            );
-        }
-
-        for (k, &raw) in c.x.iter().enumerate() {
-            let saturated = !(-1.0..=1.0).contains(&raw);
-            if saturated && legacy.grad_x[k] != 0.0 {
-                // Legacy propagates where the recovered evaluator returns exactly zero.
-                assert_ne!(
-                    legacy.grad_x[k], c.grad_x[k],
-                    "{}: legacy must disagree with torch at saturated lane {k}",
-                    c.name
-                );
-                differing += 1;
-            }
-            if !saturated {
-                assert_eq!(
-                    legacy.grad_x[k].to_bits(),
-                    corrected.grad_x[k].to_bits(),
-                    "{}: contracts agree on interior lane {k}",
-                    c.name
-                );
-            }
-        }
-    }
-    assert_eq!(
-        differing, 24,
-        "Legacy must diverge from the recovered PyTorch on every one of the 24 saturated \
-         coordinates; anything less would make the parity suite's Corrected selection vacuous"
-    );
-    println!("control: Legacy differs from torch on {differing} saturated coordinates");
-}
+// ── RETIRED with the clamp selector (2026-08-29) ──────────────────────────────────────────────
+//
+// `the_legacy_contract_remains_selectable_and_differs_on_saturated_inputs` compared the two clamp
+// arms on this fixture and established that the retired arithmetic propagates a gradient at
+// saturated lanes where the recovered PyTorch evaluator returns exactly zero, while agreeing
+// bit-for-bit at interior lanes.
+//
+// With one arithmetic left it cannot run. Named owners for its three claims:
+//
+//   retired-vs-canonical difference at saturated lanes, equality at interior lanes
+//     -> hymeko_numeric_vv::frozen_clamp_fixture::frozen_and_canonical_differ_exactly_on_the_saturated_elements
+//     -> hymeko_numeric_vv::frozen_clamp_fixture::on_a_wholly_interior_input_frozen_and_canonical_agree
+//
+//   grad_coef unaffected by the clamp
+//     -> hymeko_spline::clamp_gradient_contract::parameter_gradients_match_finite_differences
+//        (a stronger claim: the shipped parameter gradients are the TRUE ones, not merely
+//         unchanged between two arms); the historical "identical under both contracts" statement
+//         is immutable pre-deletion evidence at commit 28d4ee6.
+//
+//   canonical arm matching the recovered evaluator at saturated lanes
+//     -> the surviving grad_x assertions in this file, which compare the shipped kernel against
+//        c.grad_x directly.
 
 /// Perturbing one control point must move both its forward value and its own gradient.
 #[test]
 fn perturbing_a_single_coefficient_moves_forward_and_its_gradient() {
     let c = &cases()[4];
     let (base_out, base_cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
-    let base = catmull_rom_backward_under(
-        &c.coef,
-        &base_cache,
-        &c.grad_y,
-        ClampGradientContract::Corrected,
-    );
+    let base = catmull_rom_backward(&c.coef, &base_cache, &c.grad_y);
 
     let mut bumped = c.coef.clone();
     let target = 1usize; // interior control point of channel 0
     bumped[target] += 0.5;
     let (out, cache) = catmull_rom_forward(&bumped, &c.x, c.batch, c.channels, c.grid);
-    let back =
-        catmull_rom_backward_under(&bumped, &cache, &c.grad_y, ClampGradientContract::Corrected);
+    let back = catmull_rom_backward(&bumped, &cache, &c.grad_y);
 
     assert!(
         out.iter()

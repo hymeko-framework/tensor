@@ -157,7 +157,10 @@ mod tests {
     #[test]
     fn the_scan_finds_the_spline_sources() {
         let s = ProductionScan::new([spline_src()]);
-        s.assert_scanned_at_least(4);
+        // Three since 2026-08-29: `lib.rs`, `catmull_rom.rs`, `kochanek_bartels.rs`. It was four
+        // until `clamp_contract.rs` was deleted with the selector. The guard fired on that change,
+        // which is what it is for — an absence test over a shrinking file set passes vacuously.
+        s.assert_scanned_at_least(3);
         assert!(s.files().iter().any(|p| p.ends_with("catmull_rom.rs")));
     }
 

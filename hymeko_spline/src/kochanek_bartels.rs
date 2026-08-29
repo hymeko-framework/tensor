@@ -9,8 +9,6 @@
 //! Parameters: control points `coef (channels, grid)` + `tcb_raw (channels, grid, 3)`
 //! (unconstrained; `tanh`-mapped). All gradients are explicit.
 
-use crate::clamp_contract::ClampGradientContract;
-
 /// Cubic Hermite basis `[h00,h10,h01,h11]` at segment coordinate `s ∈ [0,1]`.
 fn hermite(s: f32) -> [f32; 4] {
     let (s2, s3) = (s * s, s * s * s);
@@ -169,28 +167,6 @@ pub fn kb_forward(
 /// # Panics
 /// Panics if buffer lengths are inconsistent with `cache`.
 pub fn kb_backward(coef: &[f32], tcb_raw: &[f32], cache: &KbCache, grad_y: &[f32]) -> KbBackward {
-    kb_backward_under(
-        coef,
-        tcb_raw,
-        cache,
-        grad_y,
-        ClampGradientContract::Corrected,
-    )
-}
-
-/// [`kb_backward`] under an explicitly named [`ClampGradientContract`].
-///
-/// # Postconditions
-/// Under [`ClampGradientContract::LegacyRecorded`] the input gradient is **exactly zero** wherever the
-/// forward saturated. Under [`ClampGradientContract::LegacyRecorded`] it reproduces the
-/// pre-2026-08-25 arithmetic bit-for-bit. `grad_coef` and `grad_tcb` are **identical under both**.
-pub fn kb_backward_under(
-    coef: &[f32],
-    tcb_raw: &[f32],
-    cache: &KbCache,
-    grad_y: &[f32],
-    contract: ClampGradientContract,
-) -> KbBackward {
     let (n, channels, grid) = (cache.n, cache.channels, cache.grid);
     assert_eq!(grad_y.len(), n * channels);
     let mut grad_coef = vec![0.0f32; channels * grid];
@@ -256,7 +232,7 @@ pub fn kb_backward_under(
             // grad w.r.t. input via the segment coordinate.
             // The clamp's own Jacobian; read from the recorded `interior` mask rather than from
             // `x_clamped`, which is always inside by construction.
-            if contract.propagates_input_gradient(cache.interior[idx]) {
+            if cache.interior[idx] {
                 let d0 = wl0 * (p[1] - p[0]) + wr0 * (p[2] - p[1]);
                 let d1 = wl1 * (p[2] - p[1]) + wr1 * (p[3] - p[2]);
                 let hd = hermite_deriv(s);

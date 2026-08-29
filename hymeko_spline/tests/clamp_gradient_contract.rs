@@ -1,16 +1,29 @@
-//! The clamp-Jacobian contract: ten proofs, per `ClampGradientContract` variant and per basis.
+//! **The clamp-Jacobian contract of the canonical kernels.**
 //!
 //! Diagnosed in `nagare/reports/2026-08-25-hsikan-grad-x-root-cause-audit.md`. Before 2026-08-25
 //! both cached backwards guarded the input gradient with `(-1.0..=1.0).contains(&x_clamped)` — a
 //! predicate on the already-clamped value, always true. `grad_x` therefore carried the interior
 //! derivative even where the forward had saturated and the true derivative is exactly zero.
 //!
+//! # Scope after the selector retirement (2026-08-29)
+//!
+//! This suite was written per `ClampGradientContract` variant. The selector is gone and there is
+//! one Jacobian, so it now tests **only the canonical kernels** and holds **no historical
+//! arithmetic**: the local `historical_cr_grad_x` transcription was deleted rather than kept as a
+//! second oracle beside the frozen one.
+//!
+//! Where the retired half went:
+//!
+//! | retired claim | owner |
+//! |---|---|
+//! | frozen historical CR / KB / Chebyshev-CR `grad_x` | `hymeko_numeric_vv/tests/support/frozen_clamp_oracle.rs` + `tests/fixtures/frozen_clamp_grad_x.txt` |
+//! | historical vs canonical discrimination | `hymeko_numeric_vv::frozen_clamp_fixture::the_fixture_is_discriminating` |
+//! | frozen-oracle fidelity to the retired production selector | **immutable pre-deletion evidence at commit `28d4ee6`**, where `frozen_clamp_oracle_parity.rs` was green. Deliberately not re-asserted at runtime: the comparand no longer exists by design. |
+//! | parameter gradients unaffected by the contract | same pre-deletion evidence; the *current* canonical `grad_coef`/`grad_tcb` correctness is `parameter_gradients_match_finite_differences` below |
+//!
 //! Every claim below is by `to_bits()` unless it is a finite-difference comparison.
 
-use hymeko_spline::{
-    catmull_rom_backward, catmull_rom_backward_under, catmull_rom_forward, kb_backward,
-    kb_backward_under, kb_forward, ClampGradientContract,
-};
+use hymeko_spline::{catmull_rom_backward, catmull_rom_forward, kb_backward, kb_forward};
 
 const GRID: usize = 5;
 const CH: usize = 2;
@@ -41,47 +54,6 @@ fn grad_y(n: usize) -> Vec<f32> {
     (0..n).map(|i| 0.5 + 0.25 * i as f32).collect()
 }
 
-/// The historical kernel, transcribed verbatim from the pre-2026-08-25 implementation.
-///
-/// It is what `LegacyRecorded` must reproduce, and it is written here **independently** rather
-/// than by calling the production path, so proof 4 compares two separately-authored computations.
-fn historical_cr_grad_x(coef: &[f32], x: &[f32], gy: &[f32]) -> Vec<f32> {
-    let n = x.len() / CH;
-    let du_dx = 0.5 * (GRID - 1) as f32;
-    let span = 0.5 * (GRID - 1) as f32;
-    let mut out = vec![0.0f32; x.len()];
-    for row in 0..n {
-        for ch in 0..CH {
-            let e = row * CH + ch;
-            let xc = x[e].clamp(-1.0, 1.0);
-            let u = (xc + 1.0) * span;
-            let i = (u.floor() as usize).min(GRID - 2);
-            let t = u - i as f32;
-            // Catmull-Rom weight derivatives, as the historical kernel computed them.
-            let dw = [
-                -0.5 + 2.0 * t - 1.5 * t * t,
-                -5.0 * t + 4.5 * t * t,
-                0.5 + 4.0 * t - 4.5 * t * t,
-                -t + 1.5 * t * t,
-            ];
-            let ctl = [
-                i.saturating_sub(1).min(GRID - 1),
-                i.min(GRID - 1),
-                (i + 1).min(GRID - 1),
-                (i + 2).min(GRID - 1),
-            ];
-            let base = ch * GRID;
-            let mut dy_dt = 0.0;
-            for k in 0..4 {
-                dy_dt += dw[k] * coef[base + ctl[k]];
-            }
-            // The tautological guard: unconditionally taken.
-            out[e] = gy[e] * dy_dt * du_dx;
-        }
-    }
-    out
-}
-
 /// PROOF 1 + 2 — the forward is untouched: interior *and* saturated outputs are bit-identical to
 /// what the pre-fix forward produced, and saturation is still flat beyond the interval.
 #[test]
@@ -109,26 +81,21 @@ fn the_forward_is_unchanged_by_the_fix() {
     assert_eq!(bits(&ka), bits(&kb), "KB forward must be flat outside");
 }
 
-/// PROOF 1 — interior input gradients are bit-identical under both contracts and to the
-/// historical kernel. The fix must not move a single interior bit.
+/// **Interior input gradients are every element non-zero and the fixture is wholly interior.**
+///
+/// This asserted bit-identity against the retired arithmetic and a local historical transcription.
+/// Both are gone; the surviving canonical claim is that an interior fixture produces a gradient
+/// everywhere — no element is zeroed — which is what the clamp guard must not do inside.
 #[test]
-fn interior_input_gradients_are_bit_identical_everywhere() {
+fn interior_input_gradients_are_present_everywhere() {
     let (c, x) = (coef(), interior_x());
     let gy = grad_y(x.len());
     let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
-    let corrected = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::Corrected);
-    let legacy = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::LegacyRecorded);
-    let historical = historical_cr_grad_x(&c, &x, &gy);
+    let corrected = catmull_rom_backward(&c, &cache, &gy);
 
-    assert_eq!(
-        bits(&corrected.grad_x),
-        bits(&legacy.grad_x),
-        "contracts agree inside"
-    );
-    assert_eq!(
-        bits(&corrected.grad_x),
-        bits(&historical),
-        "and match the historical kernel"
+    assert!(
+        corrected.grad_x.iter().all(|g| *g != 0.0),
+        "no interior coordinate may be zeroed by the clamp guard"
     );
     assert!(
         cache.interior.iter().all(|b| *b),
@@ -148,7 +115,7 @@ fn corrected_zeroes_the_gradient_outside_and_keeps_the_closed_boundary() {
     let (c, x) = (coef(), mixed_x());
     let gy = grad_y(x.len());
     let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
-    let g = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::Corrected).grad_x;
+    let g = catmull_rom_backward(&c, &cache, &gy).grad_x;
 
     for (e, &xv) in x.iter().enumerate() {
         if !(-1.0..=1.0).contains(&xv) {
@@ -168,95 +135,37 @@ fn corrected_zeroes_the_gradient_outside_and_keeps_the_closed_boundary() {
     assert!(x.contains(&1.0) && x.contains(&-1.0));
 }
 
-/// PROOF 4 + 10 — `LegacyRecorded` reproduces the defect bit-for-bit, and is observably
-/// distinguishable from `Corrected` on the same cache.
-#[test]
-fn legacy_recorded_reproduces_the_historical_defect_exactly() {
-    let (c, x) = (coef(), mixed_x());
-    let gy = grad_y(x.len());
-    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
-    let legacy = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::LegacyRecorded);
-    let corrected = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::Corrected);
-
-    assert_eq!(
-        bits(&legacy.grad_x),
-        bits(&historical_cr_grad_x(&c, &x, &gy)),
-        "LegacyRecorded must equal the independently transcribed historical kernel"
-    );
-    assert_ne!(
-        bits(&legacy.grad_x),
-        bits(&corrected.grad_x),
-        "the two contracts must be observably distinguishable on a saturating fixture"
-    );
-    let differing = legacy
-        .grad_x
-        .iter()
-        .zip(&corrected.grad_x)
-        .filter(|(a, b)| a.to_bits() != b.to_bits())
-        .count();
-    assert_eq!(differing, 3, "exactly the three exterior elements differ");
-}
-
-/// PROOF 5 — parameter gradients are bit-identical under both contracts, for both bases.
-///
-/// The clamp is on the path to `grad_x` alone; `grad_coef` and `grad_tcb` accumulate outside the
-/// guard. Asserted, not argued.
-#[test]
-fn parameter_gradients_are_identical_under_both_contracts() {
-    let (c, x, t) = (coef(), mixed_x(), tcb());
-    let gy = grad_y(x.len());
-
-    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
-    let a = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::Corrected);
-    let b = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::LegacyRecorded);
-    assert_eq!(bits(&a.grad_coef), bits(&b.grad_coef), "CR grad_coef");
-    assert!(a.grad_coef.iter().any(|v| *v != 0.0), "and is non-trivial");
-
-    let (_, kc) = kb_forward(&c, &t, &x, 3, CH, GRID);
-    let ka = kb_backward_under(&c, &t, &kc, &gy, ClampGradientContract::Corrected);
-    let kbk = kb_backward_under(&c, &t, &kc, &gy, ClampGradientContract::LegacyRecorded);
-    assert_eq!(bits(&ka.grad_coef), bits(&kbk.grad_coef), "KB grad_coef");
-    assert_eq!(bits(&ka.grad_tcb), bits(&kbk.grad_tcb), "KB grad_tcb");
-}
-
-/// PROOF 8 — Kochanek-Bartels obeys the same contract: zero outside, unchanged inside,
-/// distinguishable contracts, default is `Corrected`.
+/// **Kochanek-Bartels obeys the same clamp contract**: exactly `+0.0` outside, present inside.
 #[test]
 fn kochanek_bartels_obeys_the_same_contract() {
     let (c, t) = (coef(), tcb());
     let gy = grad_y(mixed_x().len());
 
     let (_, kc) = kb_forward(&c, &t, &mixed_x(), 3, CH, GRID);
-    let corrected = kb_backward_under(&c, &t, &kc, &gy, ClampGradientContract::Corrected);
-    let legacy = kb_backward_under(&c, &t, &kc, &gy, ClampGradientContract::LegacyRecorded);
+    let g = kb_backward(&c, &t, &kc, &gy);
     for (e, &xv) in mixed_x().iter().enumerate() {
         if !(-1.0..=1.0).contains(&xv) {
-            assert_eq!(corrected.grad_x[e].to_bits(), 0.0f32.to_bits(), "KB x={xv}");
+            assert_eq!(
+                g.grad_x[e].to_bits(),
+                0.0f32.to_bits(),
+                "KB x={xv}: exactly +0.0 outside, not -0.0 and not a small value"
+            );
         }
     }
-    assert_ne!(
-        bits(&corrected.grad_x),
-        bits(&legacy.grad_x),
-        "KB contracts differ"
-    );
-    assert_eq!(
-        bits(&kb_backward(&c, &t, &kc, &gy).grad_x),
-        bits(&corrected.grad_x),
-        "KB default entry point must be Corrected"
-    );
 
-    // Interior is untouched for KB too.
+    // Interior coordinates keep a gradient.
     let (_, ki) = kb_forward(&c, &t, &interior_x(), 3, CH, GRID);
     let gi = grad_y(interior_x().len());
-    assert_eq!(
-        bits(&kb_backward_under(&c, &t, &ki, &gi, ClampGradientContract::Corrected).grad_x),
-        bits(&kb_backward_under(&c, &t, &ki, &gi, ClampGradientContract::LegacyRecorded).grad_x),
-        "KB interior must be identical under both contracts"
+    assert!(
+        kb_backward(&c, &t, &ki, &gi)
+            .grad_x
+            .iter()
+            .all(|v| *v != 0.0),
+        "KB must not zero an interior coordinate"
     );
 }
 
-/// PROOF 9 — on a saturating fixture the corrected kernel matches central differences and the
-/// legacy kernel does not.
+/// **On a saturating fixture the canonical kernel matches central differences.**
 ///
 /// The objective is `Σ gy·f(x)`, whose exact derivative at a saturated coordinate is `0` because
 /// the forward is constant there. Both bases.
@@ -284,12 +193,10 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
     };
 
     let (_, cache) = catmull_rom_forward(&c, &x, n, CH, GRID);
-    let cr_cor = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::Corrected);
-    let cr_leg = catmull_rom_backward_under(&c, &cache, &gy, ClampGradientContract::LegacyRecorded);
+    let cr_cor = catmull_rom_backward(&c, &cache, &gy);
     let (_, kc) = kb_forward(&c, &t, &x, n, CH, GRID);
-    let kb_cor = kb_backward_under(&c, &t, &kc, &gy, ClampGradientContract::Corrected);
+    let kb_cor = kb_backward(&c, &t, &kc, &gy);
 
-    let mut legacy_failures = 0usize;
     for e in 0..x.len() {
         // The exact boundaries are EXCLUDED from the two-sided comparison, and not because the
         // numbers are inconvenient: at `x = ±1` the composed function has a kink — interior slope
@@ -301,7 +208,7 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
             continue;
         }
         // Best over an h-sweep, as every certification in this project does.
-        let (mut best_cr, mut best_kb, mut best_leg) = (f64::MAX, f64::MAX, f64::MAX);
+        let (mut best_cr, mut best_kb) = (f64::MAX, f64::MAX);
         for h in [1e-2f32, 3e-3, 1e-3] {
             let (mut hi, mut lo) = (x.clone(), x.clone());
             hi[e] += h;
@@ -310,7 +217,6 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
             let num_kb = (kb_loss(&hi) - kb_loss(&lo)) / (2.0 * h as f64);
             best_cr = best_cr.min((cr_cor.grad_x[e] as f64 - num_cr).abs());
             best_kb = best_kb.min((kb_cor.grad_x[e] as f64 - num_kb).abs());
-            best_leg = best_leg.min((cr_leg.grad_x[e] as f64 - num_cr).abs());
         }
         // Unchanged claim: 2e-3 absolute + 2 % relative, the standing project convention.
         let tol_cr = 2e-3 + 0.02 * (cr_cor.grad_x[e] as f64).abs();
@@ -325,14 +231,10 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
             "KB corrected x[{e}]={}: err {best_kb:.3e}",
             x[e]
         );
-        if best_leg >= 2e-3 + 0.02 * (cr_leg.grad_x[e] as f64).abs() {
-            legacy_failures += 1;
-        }
     }
-    assert!(
-        legacy_failures > 0,
-        "the legacy contract must fail finite differences somewhere, or this proves nothing"
-    );
+    // The non-vacuity this once took from "the legacy arm fails here" now lives in
+    // `hymeko_numeric_vv::frozen_clamp_fixture::the_fixture_is_discriminating`, which shows the
+    // frozen and canonical columns differ on a saturating probe.
 
     // The boundary, one-sided: approaching `x = 1` from INSIDE must reproduce the analytic
     // interior derivative the corrected kernel reports there.
@@ -374,4 +276,86 @@ fn the_interior_mask_records_the_raw_input_not_the_clamped_one() {
             "x_clamped is always inside — which is why it cannot serve as the guard"
         );
     }
+}
+
+/// **Canonical parameter gradients match central finite differences.**
+///
+/// Claim 7's replacement. The retired suite asserted only that `grad_coef`/`grad_tcb` were
+/// *identical under both contracts* — a statement about the clamp, not about correctness, and it
+/// died with the selector. Its pre-deletion evidence is immutable at commit `28d4ee6`.
+///
+/// SCOPE, checked rather than assumed: `scenario_gradients.rs` already owns
+/// `catmull_rom_grad_coef_matches_central_differences` and
+/// `chebyshev_cr_grad_coef_matches_central_differences`. **Kochanek-Bartels has no such owner** —
+/// neither `grad_coef` nor `grad_tcb` — so only the KB half is new here. The CR block below is
+/// retained deliberately as the *clamp-suite* cross-check that the shared `interior` mask does not
+/// perturb `grad_coef`, which is a different claim from the scenario suite's; it is three lines of
+/// reuse, not a second FD engine. No historical engine and no recorder artifact was created.
+#[test]
+fn parameter_gradients_match_finite_differences() {
+    let (x, t) = (interior_x(), tcb());
+    let gy = grad_y(x.len());
+    let n = x.len() / CH;
+    let h = 1e-3f64;
+
+    // ── Catmull-Rom control points ────────────────────────────────────────────────────────────
+    let c = coef();
+    let (_, cache) = catmull_rom_forward(&c, &x, n, CH, GRID);
+    let analytic = catmull_rom_backward(&c, &cache, &gy).grad_coef;
+    let cr_loss = |cs: &[f32]| -> f64 {
+        catmull_rom_forward(cs, &x, n, CH, GRID)
+            .0
+            .iter()
+            .zip(&gy)
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum()
+    };
+    let mut worst = 0.0f64;
+    for i in 0..c.len() {
+        let mut up = c.clone();
+        let mut dn = c.clone();
+        up[i] = (c[i] as f64 + h) as f32;
+        dn[i] = (c[i] as f64 - h) as f32;
+        let num = (cr_loss(&up) - cr_loss(&dn)) / ((up[i] as f64) - (dn[i] as f64));
+        let err = (num - analytic[i] as f64).abs() / (analytic[i] as f64).abs().max(1.0);
+        worst = worst.max(err);
+    }
+    assert!(
+        worst < 5e-3,
+        "CR grad_coef vs FD: worst relative error {worst:.3e}"
+    );
+
+    // ── Kochanek-Bartels control points and TCB ───────────────────────────────────────────────
+    let (_, kc) = kb_forward(&c, &t, &x, n, CH, GRID);
+    let kbg = kb_backward(&c, &t, &kc, &gy);
+    let kb_loss = |cs: &[f32], ts: &[f32]| -> f64 {
+        kb_forward(cs, ts, &x, n, CH, GRID)
+            .0
+            .iter()
+            .zip(&gy)
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum()
+    };
+    let mut worst_c = 0.0f64;
+    for i in 0..c.len() {
+        let (mut up, mut dn) = (c.clone(), c.clone());
+        up[i] = (c[i] as f64 + h) as f32;
+        dn[i] = (c[i] as f64 - h) as f32;
+        let num = (kb_loss(&up, &t) - kb_loss(&dn, &t)) / ((up[i] as f64) - (dn[i] as f64));
+        worst_c = worst_c
+            .max((num - kbg.grad_coef[i] as f64).abs() / (kbg.grad_coef[i] as f64).abs().max(1.0));
+    }
+    assert!(worst_c < 5e-3, "KB grad_coef vs FD: worst {worst_c:.3e}");
+
+    let mut worst_t = 0.0f64;
+    for i in 0..t.len() {
+        let (mut up, mut dn) = (t.clone(), t.clone());
+        up[i] = (t[i] as f64 + h) as f32;
+        dn[i] = (t[i] as f64 - h) as f32;
+        let num = (kb_loss(&c, &up) - kb_loss(&c, &dn)) / ((up[i] as f64) - (dn[i] as f64));
+        worst_t = worst_t
+            .max((num - kbg.grad_tcb[i] as f64).abs() / (kbg.grad_tcb[i] as f64).abs().max(1.0));
+    }
+    assert!(worst_t < 5e-3, "KB grad_tcb vs FD: worst {worst_t:.3e}");
+    println!("param-grad FD: CR {worst:.2e}  KB coef {worst_c:.2e}  KB tcb {worst_t:.2e}");
 }
