@@ -6,4 +6,8 @@ members = [
     "hymeko_spline",
     "hymeko_tensor",
     "hymeko_vision",
+    # Downstream verification & validation (2026-08-29). `publish = false`, depends on the core
+    # crates, and nothing depends on it — `hymeko_numeric_vv/tests/dependency_direction.rs` proves
+    # that by parsing every manifest here rather than trusting the comment.
+    "hymeko_numeric_vv",
 ]

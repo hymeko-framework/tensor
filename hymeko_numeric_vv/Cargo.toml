@@ -1,0 +1,30 @@
+# Downstream verification & validation for the `tensor` core crates.
+#
+# DIRECTION IS ONE-WAY. This package depends on the production crates; no production crate may
+# name it in `[dependencies]` or `[dev-dependencies]`. `tests/dependency_direction.rs` proves that
+# mechanically by parsing every manifest in the workspace.
+#
+# WHAT LIVES WHERE
+#   src/     reusable V&V *mechanisms* — finite differences, one-sided scientific bounds, source
+#            and manifest gates, a minimal digest. No retired arithmetic, no model, no trainer.
+#   tests/support/  frozen oracles. Test-only by construction: they are not part of any library
+#            target, so nothing outside this package's own test binaries can link them.
+#
+# There is deliberately no `[[bin]]`, no CLI, no trainer and no experiment runner here.
+[package]
+name = "hymeko_numeric_vv"
+version = "0.1.0"
+edition = "2021"
+description = "Downstream numerical verification & validation for the hymeko core crates: frozen oracles, cross-crate contract checks, finite-difference certification."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "hymeko_numeric_vv"
+path = "src/lib.rs"
+
+[dependencies]
+# `parallel` on, matching how `nagare` links the splines: the crate documents byte-identical
+# results either way, and the V&V package is the right place for that claim to be exercised
+# rather than assumed.
+hymeko_spline = { path = "../hymeko_spline", features = ["parallel"] }
