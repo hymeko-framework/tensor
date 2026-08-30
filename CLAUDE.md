@@ -204,6 +204,85 @@ Every change ships with tests, and tests are executed and pass before reporting 
   - **Inference / runtime latency** — wall time and, where relevant, throughput (samples/s, tokens/s).
   - Each performance test asserts a numerical budget. A test that only prints numbers is not a performance test.
 
+<!-- BEGIN SHARED V&V ARCHITECTURE -->
+### V&V architecture: one production entry point, many downstream checks
+
+Verification asks whether the implementation satisfies its mathematical,
+structural, numerical, state, and performance contracts. Validation asks
+whether that verified implementation reproduces the intended real use case,
+dataset protocol, artifact, or scientific claim. A completed feature needs both
+where both apply; passing verification alone does not validate a paper claim,
+and matching one artifact does not verify the implementation.
+
+**Production topology.** Each capability has exactly one authoritative
+production entry point and one implementation owner. The framework may be a
+hierarchy of multiple cohesive crates/modules/libraries; "one library" means
+one directed ownership graph presented as one framework, not one monolithic
+source file. Orthogonal variation is expressed through typed configuration,
+traits, or sealed enums behind that entry point. Do not create a parallel model,
+trainer, optimizer, numerical kernel, runner, or study-named production module
+in `examples/`, `experiments/`, tests, benches, or a paper panel.
+
+**Tests are clients.** Normal tests construct inputs and typed configuration,
+then call existing production functions/methods. They may compare bits, inspect
+neutral read-only state, calculate hashes/statistics, perform finite
+differences, and assert invariants. Test helpers may own fixture builders,
+observers, comparators, deterministic generators, and artifact parsers. They
+must not introduce new production behavior or silently recreate the model,
+training loop, optimizer, backward pass, or orchestration being tested. If a
+test requires a new generally useful operation, that is a missing production
+owner: design it in the framework first, then test it through the canonical
+entry point.
+
+**Independent-oracle exception.** Avoid tautological tests: an equivalence test
+must not obtain its expected value by calling the same composite it checks. A
+private test-only oracle is therefore permitted only when it is:
+
+1. a frozen implementation captured from a known-working example/experiment
+   before retirement, or a minimal closed-form/high-precision reference;
+2. recorded with its origin, source hash, arithmetic contract, and known scope;
+3. non-public, `publish = false` where packaged, and unreachable from every
+   production dependency path;
+4. used only to produce expected observations, never selected as a runtime
+   implementation; and
+5. frozen rather than developed into another framework.
+
+Do not write a fresh alternative model or trainer after the original has been
+deleted and call it an oracle. Capture the working reference first. Retaining a
+retired body in a private V&V package is provenance, not permission to retain a
+`Legacy*` production arm.
+
+**Separate test packages.** When the V&V surface is substantial, use downstream
+workspace packages instead of putting engines back into examples:
+
+- a `publish = false` contract/equivalence package for fast deterministic,
+  synthetic, bit-parity, adjoint, finite-difference, and optimizer-lockstep
+  verification;
+- a `publish = false` reproduction package for datasets, paper configurations,
+  historical artifacts, and explicitly invoked real-data validation.
+
+Dependency direction is one-way: V&V packages depend on the production
+framework; production never depends on V&V packages. Their tests compile under
+the workspace gate. Data-dependent validations may be `#[ignore]`, but an
+explicit run must fail clearly when required data is absent rather than
+silently skip. Tests never read an NFS path implicitly.
+
+**Examples and experiments.** Examples are thin demonstrations of the public
+API, not owners of models, gradients, optimizers, or research engines.
+Experiments/panels may choose configuration, data, seeds, and reporting, but
+call the same production entry point. Before retiring an existing engine, map
+initialization, forward, backward, optimizer state, evaluation, fixtures, and
+artifact claims to permanent V&V tests; capture and hash any independent oracle;
+then reconcile the test population exactly. Deletion is blocked until every
+live responsibility has an executable test owner.
+
+**One full gate.** Focused package tests are useful discriminating sub-gates,
+not competing top-level runners. Each repository keeps one canonical full V&V
+entry point (for example `scripts/check.sh`) that compiles/runs the applicable
+contract packages, reproduction packages, integration tests, doctests,
+bench-compilation checks, and repository policy gates.
+
+<!-- END SHARED V&V ARCHITECTURE -->
 ### Rules
 
 - New public code without tests is rejected by you, not approved.
