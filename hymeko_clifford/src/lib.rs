@@ -34,7 +34,7 @@ pub mod algebra;
 pub mod autodiff;
 
 pub use algebra::{
-    Multivector, Signature, blade_product, canonical_reorder_sign, cayley_rotor_backward,
+    Multivector, Se, Signature, blade_product, canonical_reorder_sign, cayley_rotor_backward,
     cayley_rotor_forward, cayley_to_unit_quat, quat_conjugate, quat_mul, quat_rotate,
     rotor_holonomy_backward, rotor_holonomy_forward,
 };
