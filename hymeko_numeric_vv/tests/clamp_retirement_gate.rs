@@ -28,11 +28,17 @@ fn production() -> ProductionScan {
     let scan = ProductionScan::new([
         w.join("hymeko_spline/src"),
         w.join("hymeko_clifford/src"),
-        w.join("hymeko_graph/src"),
+        // hymeko_graph retired 2026-08-30; the canonical owner lives in the `hymeko/graph`
+        // repository and is scanned by that repo's own gates.
         w.join("hymeko_tensor/src"),
         w.join("hymeko_vision/src"),
     ]);
-    scan.assert_scanned_at_least(20);
+    // Floor recalibrated 2026-08-30 from 20 to 12. `hymeko_graph` was retired from this
+    // workspace that day, taking ~18 source files with it and dropping the scan from 34 to 16.
+    // The floor exists to catch a scan that silently stopped resolving -- an empty scan passes
+    // every absence test vacuously -- so it is re-anchored just under the new real count rather
+    // than deleted. 12 still catches the loss of any one of the four remaining crate roots.
+    scan.assert_scanned_at_least(12);
     scan
 }
 

@@ -11,7 +11,7 @@
 //!   learner; this crate owns only the format.
 //!
 //! Co-located in the `tensor` workspace with the geometric-algebra (`hymeko_clifford`) and hypergraph-incidence
-//! (`hymeko_graph`) foundations of the Tensor pillar.
+//! (`hymeko_graph`, now owned by the `hymeko/graph` repository) foundations of the Tensor pillar.
 
 pub mod linalg;
 pub mod renyi;

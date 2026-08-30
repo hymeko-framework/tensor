@@ -34,7 +34,10 @@ fn the_gate_actually_saw_the_workspace() {
     let names: Vec<String> = manifests.iter().filter_map(|m| m.package_name()).collect();
     for expected in [
         "hymeko_clifford",
-        "hymeko_graph",
+        // `hymeko_graph` is deliberately absent: it was retired from this workspace on
+        // 2026-08-30 in favour of the canonical owner in the `hymeko/graph` repository. Leaving
+        // it here would make this anti-vacuity guard fail for the right reason but the wrong
+        // cause, and removing the guard entirely would let a genuinely empty scan pass.
         "hymeko_spline",
         "hymeko_tensor",
         "hymeko_vision",
