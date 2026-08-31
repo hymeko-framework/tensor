@@ -99,16 +99,37 @@ fn add_scaled(a: &mut [f64; 9], b: &[f64; 9], s: f64) {
     }
 }
 
-/// The rotation of `x` as a row-major 3x3, extracted once.
+/// The rotation of `x` as a row-major 3x3, from the rotor's quaternion in closed form.
 ///
-/// The blockwise congruences below need `R . A . R^T`, which cannot be spelled through
-/// [`Se3::rotate`] without a rotor sandwich per column. Pulling the matrix out once and using dense
-/// arithmetic is both clearer and cheaper.
+/// [`Se3::rotation_matrix_into`] answers the same question by rotating each basis vector, and each
+/// of those is a rotor sandwich: two geometric products over eight-component multivectors, about
+/// 128 multiplies. Three columns is nearly four hundred, which measured as the single largest cost
+/// in a spatial frame change — larger than the congruence it was being computed for.
+///
+/// The quaternion form is about twenty. It is NOT bit-identical to the sandwich, which is why it
+/// lives here as a private helper rather than replacing the general method: `SeFixed`'s matrix is
+/// pinned bit-for-bit against `Se`'s by `tests/se_fixed.rs`, and that contract is worth more than
+/// the speed. Nothing in this module pins the congruence to a stored number, so the last bit is
+/// free to differ; what it must not do is differ by more than rounding, and
+/// `the_fast_rotation_matrix_agrees_with_the_general_one` holds it to that.
 #[inline]
 fn rotation_of(x: &Se3) -> [f64; 9] {
-    let mut r = [0.0f64; 9];
-    x.rotation_matrix_into(&mut r);
-    r
+    let [w, i, j, k] = x.quaternion();
+    let (i2, j2, k2) = (i + i, j + j, k + k);
+    let (wi, wj, wk) = (w * i2, w * j2, w * k2);
+    let (ii, ij, ik) = (i * i2, i * j2, i * k2);
+    let (jj, jk, kk) = (j * j2, j * k2, k * k2);
+    [
+        1.0 - (jj + kk),
+        ij - wk,
+        ik + wj,
+        ij + wk,
+        1.0 - (ii + kk),
+        jk - wi,
+        ik - wj,
+        jk + wi,
+        1.0 - (ii + jj),
+    ]
 }
 
 /// `R . a . R^T`, the congruence that moves a 3x3 block between frames.
@@ -245,6 +266,118 @@ impl Twist {
     }
 }
 
+// --- the exponential map ------------------------------------------------------------------------
+
+/// Below this rotation angle the closed forms below are evaluated as series instead.
+///
+/// Not a tolerance on the answer — a tolerance on the ARITHMETIC. The coefficients are `0/0` at
+/// zero angle and catastrophically cancelling just above it: at `theta = 1e-6`, `1 - cos(theta)` is
+/// `5e-13` computed as a difference of two numbers near one, which has already lost six digits
+/// before the division by `theta^2` magnifies what is left. The series has no such difference in it.
+/// The crossover is placed where the series' own truncation is below the double epsilon, so both
+/// branches are exact there and nothing jumps across it.
+const SERIES_BELOW: f64 = 1e-3;
+
+impl Twist {
+    /// The rigid motion this twist produces when held for unit time.
+    ///
+    /// The exponential map of `se(3)` onto `SE(3)`: a constant screw motion — rotate about an axis
+    /// while sliding along it — integrated exactly, in closed form, for the whole interval. Not a
+    /// step of an integrator and not an approximation of one.
+    ///
+    /// # Why a rigid-body integrator wants this
+    ///
+    /// Advancing a pose as `X + X_dot dt` leaves `SE(3)` immediately: the rotor stops being unit and
+    /// has to be renormalised, which is a correction with no physical meaning applied at a rate
+    /// nobody chose. `X.compose(&(v.scale(dt)).exp())` lands exactly on the group at every step, for
+    /// any step size, because a screw motion is what a constant twist actually does.
+    ///
+    /// It is also the right way to interpolate between two poses ([`Se3::log`] gives the twist
+    /// between them) and the right way to express a pose error to a Cartesian controller, which
+    /// wants one six-vector rather than a rotation and a translation it has to reconcile by hand.
+    pub fn exp(&self) -> Se3 {
+        let theta = (self.w[0] * self.w[0] + self.w[1] * self.w[1] + self.w[2] * self.w[2]).sqrt();
+
+        // `V = I + B [w]x + C [w]x^2`, applied as cross products rather than assembled: the matrix
+        // exists only to be multiplied by one vector.
+        let (b, c) = if theta < SERIES_BELOW {
+            let t2 = theta * theta;
+            (
+                0.5 - t2 / 24.0 + t2 * t2 / 720.0,
+                1.0 / 6.0 - t2 / 120.0 + t2 * t2 / 5040.0,
+            )
+        } else {
+            let t2 = theta * theta;
+            (
+                (1.0 - theta.cos()) / t2,
+                (theta - theta.sin()) / (t2 * theta),
+            )
+        };
+
+        let k1 = cross(&self.w, &self.v);
+        let k2 = cross(&self.w, &k1);
+        let translation = [
+            self.v[0] + b * k1[0] + c * k2[0],
+            self.v[1] + b * k1[1] + c * k2[1],
+            self.v[2] + b * k1[2] + c * k2[2],
+        ];
+
+        let mut out = Se3::axis_angle(self.w, theta);
+        out.translation = translation;
+        out
+    }
+}
+
+impl Se3 {
+    /// The twist that, held for unit time, produces this motion. The inverse of [`Twist::exp`].
+    ///
+    /// The angular part is returned on `[0, pi]` — the shorter way round — because a rotor and its
+    /// negative are the same rotation and there is no way to tell which of the two turns was meant.
+    /// A caller tracking a winding has to carry it separately; nothing in the group remembers it.
+    pub fn log(&self) -> Twist {
+        let q = self.quaternion();
+        // fold the double cover: q and -q are the same motion, and only one of them has a
+        // non-negative scalar part
+        let (scalar, vector) = if q[0] < 0.0 {
+            (-q[0], [-q[1], -q[2], -q[3]])
+        } else {
+            (q[0], [q[1], q[2], q[3]])
+        };
+        let n = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+        // atan2 rather than `2 acos(w)`: near the identity the latter loses precision to
+        // cancellation exactly where the angle is small enough to matter
+        let theta = 2.0 * n.atan2(scalar);
+
+        let w = if n < 1e-300 {
+            [0.0; 3]
+        } else {
+            let k = theta / n;
+            [vector[0] * k, vector[1] * k, vector[2] * k]
+        };
+
+        // `V^-1 = I - [w]x/2 + D [w]x^2`
+        let d = if theta < SERIES_BELOW {
+            let t2 = theta * theta;
+            1.0 / 12.0 + t2 / 720.0 + t2 * t2 / 30240.0
+        } else {
+            let t2 = theta * theta;
+            (1.0 - (theta * theta.sin()) / (2.0 * (1.0 - theta.cos()))) / t2
+        };
+
+        let t = &self.translation;
+        let k1 = cross(&w, t);
+        let k2 = cross(&w, &k1);
+        Twist {
+            w,
+            v: [
+                t[0] - 0.5 * k1[0] + d * k2[0],
+                t[1] - 0.5 * k1[1] + d * k2[1],
+                t[2] - 0.5 * k1[2] + d * k2[2],
+            ],
+        }
+    }
+}
+
 // --- force ---------------------------------------------------------------------------------
 
 /// A spatial force vector: `(n, f)`, moment first.
@@ -321,21 +454,26 @@ impl Wrench {
 }
 
 /// The shared body of both `to_parent`s: `a` rotates, `b` rotates and picks up `t x Ra`.
+///
+/// Through the matrix rather than through [`Se3::rotate`], for the reason [`rotation_of`] gives: a
+/// rotor sandwich is about 128 multiplies and a matrix-vector product is nine, and a frame change
+/// does two of them.
 #[inline]
 fn to_parent_pair(x: &Se3, a: &[f64; 3], b: &[f64; 3]) -> ([f64; 3], [f64; 3]) {
-    let ra = x.rotate(a);
-    let rb = x.rotate(b);
+    let r = rotation_of(x);
+    let ra = mat_vec(&r, a);
+    let rb = mat_vec(&r, b);
     let tc = cross(&x.translation, &ra);
     (ra, [rb[0] + tc[0], rb[1] + tc[1], rb[2] + tc[2]])
 }
 
-/// The inverse of [`to_parent_pair`].
+/// The inverse of [`to_parent_pair`]. `R^T` is the transpose, so no inverse has to be built.
 #[inline]
 fn to_child_pair(x: &Se3, a: &[f64; 3], b: &[f64; 3]) -> ([f64; 3], [f64; 3]) {
-    let xi = x.inverse();
+    let r = rotation_of(x);
     let tc = cross(&x.translation, a);
     let shifted = [b[0] - tc[0], b[1] - tc[1], b[2] - tc[2]];
-    (xi.rotate(a), xi.rotate(&shifted))
+    (mat_t_vec(&r, a), mat_t_vec(&r, &shifted))
 }
 
 // --- inertia -----------------------------------------------------------------------------------
@@ -510,15 +648,60 @@ impl ArticulatedInertia {
         let ip = conjugate(&r, &self.aa);
 
         // al_p = H' + t~ M'
+        let t_ll = mat_mul(&t, &ll);
         let mut al = hp;
-        add_scaled(&mut al, &mat_mul(&t, &ll), 1.0);
+        add_scaled(&mut al, &t_ll, 1.0);
 
-        // aa_p = I' + t~ H'^T - H' t~ - t~ M' t~
+        // aa_p = I' + t~ H'^T - H' t~ - t~ M' t~, reusing `t~ M'` rather than forming it twice
         let mut aa = ip;
         add_scaled(&mut aa, &mat_mul(&t, &transpose(&hp)), 1.0);
         add_scaled(&mut aa, &mat_mul(&hp, &t), -1.0);
-        add_scaled(&mut aa, &mat_mul(&mat_mul(&t, &ll), &t), -1.0);
+        add_scaled(&mut aa, &mat_mul(&t_ll, &t), -1.0);
 
         Self { aa, al, ll }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The quaternion matrix against the one built by rotating each basis vector.
+    ///
+    /// A unit test rather than an integration one because [`rotation_of`] is private, and it is
+    /// private because it is a shortcut: the general method's bit-for-bit contract with `Se` is what
+    /// callers rely on, and this must not quietly become the thing that answers for it.
+    ///
+    /// To ROUNDING, not to the bit. Two correct routes to the same rotation disagree in the last
+    /// place, and asserting otherwise would be asserting that floating-point multiplication is
+    /// associative.
+    #[test]
+    fn the_fast_rotation_matrix_agrees_with_the_general_one() {
+        let mut state = 0x5EEDu64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            2.0 * ((state >> 11) as f64 / (1u64 << 53) as f64) - 1.0
+        };
+        for case in 0..500 {
+            let x = Se3::rpy_xyz(
+                [next() * 3.2, next() * 3.2, next() * 3.2],
+                [next(), next(), next()],
+            );
+            let fast = rotation_of(&x);
+            let mut general = [0.0f64; 9];
+            x.rotation_matrix_into(&mut general);
+            for k in 0..9 {
+                assert!(
+                    (fast[k] - general[k]).abs() < 1e-14,
+                    "case {case}: entry {k} differs by {:e}",
+                    (fast[k] - general[k]).abs()
+                );
+            }
+        }
+        // and the identity is the identity, exactly
+        let i = rotation_of(&Se3::identity());
+        assert_eq!(i, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
     }
 }

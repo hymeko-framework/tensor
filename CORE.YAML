@@ -53,9 +53,25 @@ core:
   # Measured motive: forward dynamics was assembling `M = sum_i m_i J_i^T J_i` from finite-difference
   # Jacobians and solving it densely — `2n+1` kinematics passes, an n^2 assembly, an n^3 solve, for a
   # coupling the topology already stated exactly. With this algebra the consumer
-  # (`hymeko_geometry::articulated`) sweeps the tree instead: 4.81/6.90/18.48 us against
-  # 34.35/49.58/330.34 us on a 9/13/33-link robot, and linear in the links (0.53 us each) where the
-  # matrix path was not.
+  # (`hymeko_geometry::articulated`) sweeps the tree instead: 1.39/1.85/4.86 us against
+  # 34.29/48.27/324.41 us on a 9/13/33-link robot, and linear in the links (~0.147 us each) where
+  # the matrix path was not.
+  #
+  # Extended 2026-09-01 with the exponential map, `Twist::exp` and `Se3::log` — the missing
+  # fundamental operation of the group. A constant screw motion integrated in closed form, so a pose
+  # advanced as `X.compose(&(v.scale(dt)).exp())` lands EXACTLY on SE(3) at any step size instead of
+  # leaving it and being renormalised. Checked against a scaling-and-squaring matrix exponential that
+  # shares no code with it, across eleven decades of rotation angle, plus the one-parameter subgroup
+  # law and ten thousand composed steps with the rotor still unit to 1e-12.
+  #
+  # `rotation_of` is a PRIVATE quaternion-form rotation matrix, deliberately not a replacement for
+  # `SeFixed::rotation_matrix_into`, whose bit-for-bit contract with `Se` is worth more than the
+  # speed. The general method answers by rotating each basis vector, and each of those is a rotor
+  # sandwich — two geometric products over eight-component multivectors, ~128 multiplies, ~384 for
+  # the three columns. That measured as the single largest cost in a spatial frame change, larger
+  # than the congruence it was being computed for. The quaternion form is ~20, and replacing it
+  # (with the vector transforms too) took forward dynamics from 4.65/6.75/17.62 us to
+  # 1.39/1.85/4.86 -- 3.3x to 3.6x from one change. A unit test holds the two to rounding.
   #
   # TESTED AS IDENTITIES, not against recorded numbers, because a wrong sign in a spatial transform
   # produces a plausible six-vector rather than an error: power is invariant under a change of frame,

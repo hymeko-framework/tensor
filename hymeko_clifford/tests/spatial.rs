@@ -331,3 +331,287 @@ fn the_rank_one_downdate_removes_exactly_one_direction() {
         );
     }
 }
+
+// --- the exponential map --------------------------------------------------------------------
+
+/// `exp` of the 4x4 `[[w]x, v; 0, 0]`, by scaling, a Taylor sum, and repeated squaring.
+///
+/// A second implementation that shares nothing with the first: no quaternion, no Rodrigues formula,
+/// no series coefficient, no case split on the angle. It is slow and it is obvious, which is exactly
+/// what a reference should be.
+fn matrix_exp_reference(t: &Twist) -> ([f64; 9], [f64; 3]) {
+    let mut m = [[0.0f64; 4]; 4];
+    m[0][1] = -t.w[2];
+    m[0][2] = t.w[1];
+    m[1][0] = t.w[2];
+    m[1][2] = -t.w[0];
+    m[2][0] = -t.w[1];
+    m[2][1] = t.w[0];
+    for (row, &v) in m.iter_mut().zip(&t.v) {
+        row[3] = v;
+    }
+
+    // scale until the norm is small enough that twenty terms are past double precision
+    let norm = m
+        .iter()
+        .map(|r| r.iter().map(|v| v.abs()).sum::<f64>())
+        .fold(0.0f64, f64::max);
+    let squarings = if norm > 0.25 {
+        (norm / 0.25).log2().ceil() as u32
+    } else {
+        0
+    };
+    let scale = 1.0 / (1u64 << squarings) as f64;
+    for row in m.iter_mut() {
+        for v in row.iter_mut() {
+            *v *= scale;
+        }
+    }
+
+    let mul = |a: &[[f64; 4]; 4], b: &[[f64; 4]; 4]| {
+        let mut o = [[0.0f64; 4]; 4];
+        for (i, orow) in o.iter_mut().enumerate() {
+            for (k, &aik) in a[i].iter().enumerate() {
+                for (j, ov) in orow.iter_mut().enumerate() {
+                    *ov += aik * b[k][j];
+                }
+            }
+        }
+        o
+    };
+
+    let mut acc = [[0.0f64; 4]; 4];
+    for (i, row) in acc.iter_mut().enumerate() {
+        row[i] = 1.0;
+    }
+    let mut term = acc;
+    for k in 1..24 {
+        term = mul(&term, &m);
+        for row in term.iter_mut() {
+            for v in row.iter_mut() {
+                *v /= k as f64;
+            }
+        }
+        for (a, t) in acc.iter_mut().zip(&term) {
+            for (av, tv) in a.iter_mut().zip(t) {
+                *av += tv;
+            }
+        }
+    }
+    for _ in 0..squarings {
+        acc = mul(&acc, &acc);
+    }
+
+    let mut r = [0.0f64; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            r[i * 3 + j] = acc[i][j];
+        }
+    }
+    (r, [acc[0][3], acc[1][3], acc[2][3]])
+}
+
+/// A twist whose rotation has exactly the magnitude asked for.
+fn twist_of_magnitude(rng: &mut Rng, magnitude: f64) -> Twist {
+    let mut w = rng.vec3();
+    let n = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt().max(1e-300);
+    for c in w.iter_mut() {
+        *c *= magnitude / n;
+    }
+    Twist { w, v: rng.vec3() }
+}
+
+#[test]
+fn the_exponential_agrees_with_a_matrix_exponential_that_shares_no_code_with_it() {
+    // Across eleven orders of magnitude in the rotation angle, so the series branch, the closed-form
+    // branch and the crossover between them are all covered by the same reference.
+    let mut rng = Rng(0xE4F);
+    for decade in 0..11 {
+        let magnitude = 10f64.powi(-decade) * 3.0;
+        for case in 0..40 {
+            let t = twist_of_magnitude(&mut rng, magnitude);
+
+            let got = t.exp();
+            let (want_r, want_t) = matrix_exp_reference(&t);
+            let mut got_r = [0.0f64; 9];
+            got.rotation_matrix_into(&mut got_r);
+
+            for k in 0..9 {
+                close(
+                    got_r[k],
+                    want_r[k],
+                    1e-11,
+                    &format!("|w|={magnitude:e} case {case}: rotation[{k}]"),
+                );
+            }
+            for (k, (&got_v, &want_v)) in got.translation.iter().zip(&want_t).enumerate() {
+                close(
+                    got_v,
+                    want_v,
+                    1e-11,
+                    &format!("|w|={magnitude:e} case {case}: translation[{k}]"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_logarithm_undoes_the_exponential_and_the_other_way_round() {
+    let mut rng = Rng(1234);
+    for decade in 0..12 {
+        // below pi, where the logarithm is single-valued
+        let magnitude = 10f64.powi(-decade) * 3.0;
+        for case in 0..30 {
+            let t = twist_of_magnitude(&mut rng, magnitude);
+            twists_close(
+                &t.exp().log(),
+                &t,
+                1e-9,
+                &format!("|w|={magnitude:e} log(exp) case {case}"),
+            );
+        }
+    }
+
+    // and from the group's side
+    for case in 0..200 {
+        let x = rng.pose();
+        let back = x.log().exp();
+        for k in 0..3 {
+            close(
+                back.translation[k],
+                x.translation[k],
+                1e-10,
+                &format!("exp(log) case {case}: translation[{k}]"),
+            );
+        }
+        let (mut a, mut b) = ([0.0f64; 9], [0.0f64; 9]);
+        back.rotation_matrix_into(&mut a);
+        x.rotation_matrix_into(&mut b);
+        for k in 0..9 {
+            close(
+                a[k],
+                b[k],
+                1e-10,
+                &format!("exp(log) case {case}: rotation[{k}]"),
+            );
+        }
+    }
+}
+
+#[test]
+fn a_constant_twist_traces_a_one_parameter_subgroup() {
+    // `exp(s v) . exp(t v) == exp((s+t) v)`. This is what makes it a screw motion rather than a
+    // sequence of small corrections, and it is the property an integrator relies on: a step of `dt`
+    // taken twice must equal one step of `2 dt`, exactly, at any size.
+    let mut rng = Rng(88);
+    for case in 0..200 {
+        let t = Twist {
+            w: rng.vec3(),
+            v: rng.vec3(),
+        };
+        for (a, b) in [(0.3, 0.7), (1.0, 1.0), (2.5, -1.5), (1e-9, 1.0)] {
+            let split = t.scale(a).exp().compose(&t.scale(b).exp());
+            let whole = t.scale(a + b).exp();
+            for k in 0..3 {
+                close(
+                    split.translation[k],
+                    whole.translation[k],
+                    1e-10,
+                    &format!("case {case} split ({a},{b}): translation[{k}]"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn integrating_a_twist_in_many_small_steps_lands_where_one_big_step_does() {
+    // The claim a rigid-body integrator actually makes: composing `exp(v/n)` n times equals
+    // `exp(v)`, for any n, with no drift and no renormalisation. Ten thousand steps, and the rotor
+    // must still be unit to machine precision — a linear update would have left the group at the
+    // first one.
+    let mut rng = Rng(31);
+    for case in 0..20 {
+        let t = Twist {
+            w: rng.vec3(),
+            v: rng.vec3(),
+        };
+        let n = 10_000;
+        let small = t.scale(1.0 / n as f64).exp();
+        let mut acc = Se3::identity();
+        for _ in 0..n {
+            acc = acc.compose(&small);
+        }
+        let whole = t.exp();
+
+        for k in 0..3 {
+            close(
+                acc.translation[k],
+                whole.translation[k],
+                1e-9,
+                &format!("case {case}: translation[{k}] after {n} steps"),
+            );
+        }
+        // still exactly on the group
+        let r = &acc.rotor;
+        let norm = (r[0] * r[0] + r[3] * r[3] + r[5] * r[5] + r[6] * r[6]).sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-12,
+            "case {case}: the rotor drifted off the group, |R| = {norm}"
+        );
+    }
+}
+
+#[test]
+fn the_degenerate_cases_are_the_ones_they_should_be() {
+    // A twist with no rotation is a straight translation, and one with no translation is a rotation
+    // about the origin. Both are where the series branch is reached with nothing left to cancel.
+    let mut rng = Rng(7);
+    for case in 0..100 {
+        let v = rng.vec3();
+        let straight = Twist { w: [0.0; 3], v }.exp();
+        for (&got, &want) in straight.translation.iter().zip(&v) {
+            assert_eq!(
+                got, want,
+                "case {case}: a twist with no rotation must translate by exactly v"
+            );
+        }
+        assert_eq!(
+            straight.rotor,
+            Se3::identity().rotor,
+            "case {case}: and not turn"
+        );
+
+        let axis = rng.vec3();
+        let angle = rng.signed() * 3.0;
+        let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        let w = [
+            axis[0] / n * angle,
+            axis[1] / n * angle,
+            axis[2] / n * angle,
+        ];
+        let spun = Twist { w, v: [0.0; 3] }.exp();
+        let reference = Se3::axis_angle(axis, angle);
+        // Close, NOT bit-identical, and deliberately so: `exp` recovers the angle as `|w|` and
+        // normalises `w = axis * angle / |axis|`, while `axis_angle` normalises `axis` and is handed
+        // the angle. Those are different sequences of roundings for the same function, and demanding
+        // the last bit of one from the other would be asserting that floating-point multiplication
+        // is associative.
+        for k in 0..8 {
+            close(
+                spun.rotor[k],
+                reference.rotor[k],
+                1e-14,
+                &format!("case {case}: pure rotation rotor[{k}]"),
+            );
+        }
+        assert_eq!(
+            spun.translation,
+            [0.0; 3],
+            "case {case}: a rotation about the origin moves the origin nowhere"
+        );
+    }
+    // and the identity logs to zero
+    twists_close(&Se3::identity().log(), &Twist::ZERO, 1e-15, "identity");
+}
