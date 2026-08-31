@@ -32,6 +32,22 @@ core:
   # a plaquette holonomy from the identity IS the flux through that cell, gauge fixing IS the choice
   # of spanning tree, and a divergence-free constraint becomes an identity the representation
   # already satisfies rather than one to enforce.
+  #
+  # `algebra/se_fixed.rs` added 2026-09-01: SE(n) with the dimension supplied at compile time, so a
+  # rigid motion lives on the stack instead of in two `Vec<f64>`s. Measured motive: forward
+  # kinematics over a 33-link quadruped spends about seventy per cent of its time in ~1200
+  # allocations, and nothing about the algebra asks for them.
+  #
+  # ONE GENERIC BODY, not a second implementation. `Se3` is the alias `SeFixed<Dim3>`; the group law
+  # is written once against `EuclideanDim`, which carries n and the two array types because stable
+  # Rust cannot yet spell `[f64; 1 << N]`. Only the constructors that NAME axes are
+  # dimension-specific. `tests/se_fixed.rs` exercises SE(2) through the same body precisely so that a
+  # three-dimensional implementation dressed as generic could not pass.
+  #
+  # BIT-IDENTICAL to `Se`, and tested as such rather than to a tolerance: same loop bounds, same
+  # skip-if-zero guards, same accumulation order. Floating-point addition is not associative, so a
+  # faster summation order would be a different function, and a consumer holding a recorded pose
+  # would watch it move.
   - hymeko_clifford
 
   # Spline activation kernels — on the measured hot path of every KAN and HSiKAN run.

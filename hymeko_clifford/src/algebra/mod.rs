@@ -15,6 +15,7 @@ mod connection;
 mod multivector;
 mod rotor;
 mod se;
+mod se_fixed;
 mod signature;
 
 pub use blade::{blade_product, canonical_reorder_sign};
@@ -28,4 +29,5 @@ pub use rotor::{
     quat_rotate, rotor_holonomy_backward, rotor_holonomy_forward,
 };
 pub use se::Se;
+pub use se_fixed::{Dim2, Dim3, EuclideanDim, Se2, Se3, SeFixed};
 pub use signature::Signature;
