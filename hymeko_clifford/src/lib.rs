@@ -34,7 +34,8 @@ pub mod algebra;
 pub mod autodiff;
 
 pub use algebra::{
-    Dim2, Dim3, EuclideanDim, Multivector, Se, Se2, Se3, SeFixed, Signature, TreeStep, blade_product, canonical_reorder_sign,
+    ArticulatedInertia, Dim2, Dim3, EuclideanDim, Multivector, Se, Se2, Se3, SeFixed, Signature,
+    SpatialInertia, TreeStep, Twist, Wrench, blade_product, canonical_reorder_sign,
     cayley_rotor_backward, cayley_rotor_forward, cayley_to_unit_quat, closed_form_curvature,
     cotree_residuals, curvature_energy, quat_conjugate, quat_mul, quat_rotate, rotor_angle,
     rotor_holonomy_backward, rotor_holonomy_forward, tree_gauge_frames,

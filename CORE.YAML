@@ -44,6 +44,25 @@ core:
   # dimension-specific. `tests/se_fixed.rs` exercises SE(2) through the same body precisely so that a
   # three-dimensional implementation dressed as generic could not pass.
   #
+  # `algebra/spatial.rs` added 2026-09-01: spatial vectors — `Twist`, `Wrench`, `SpatialInertia`,
+  # `ArticulatedInertia`. The Lie algebra of the group this crate already carries, in the crate that
+  # carries the group. Nothing in it knows what a link, a joint or a robot is: a twist is the
+  # derivative of an `Se3` along a curve, a wrench is its dual under the pairing that gives power,
+  # and a spatial inertia is the metric between them.
+  #
+  # Measured motive: forward dynamics was assembling `M = sum_i m_i J_i^T J_i` from finite-difference
+  # Jacobians and solving it densely — `2n+1` kinematics passes, an n^2 assembly, an n^3 solve, for a
+  # coupling the topology already stated exactly. With this algebra the consumer
+  # (`hymeko_geometry::articulated`) sweeps the tree instead: 4.81/6.90/18.48 us against
+  # 34.35/49.58/330.34 us on a 9/13/33-link robot, and linear in the links (0.53 us each) where the
+  # matrix path was not.
+  #
+  # TESTED AS IDENTITIES, not against recorded numbers, because a wrong sign in a spatial transform
+  # produces a plausible six-vector rather than an error: power is invariant under a change of frame,
+  # the two cross products are dual (`(a x b).f == -b.(a x* f)`), the bracket obeys Jacobi, a point
+  # mass's momentum is the one Newton would write, and transforming an inertia equals transforming
+  # what it acts on. `tests/spatial.rs`, nine suites.
+  #
   # BIT-IDENTICAL to `Se`, and tested as such rather than to a tolerance: same loop bounds, same
   # skip-if-zero guards, same accumulation order. Floating-point addition is not associative, so a
   # faster summation order would be a different function, and a consumer holding a recorded pose
