@@ -63,6 +63,43 @@ core:
   # and the copies are retired. Keep it the single source of truth — do not re-copy from it.
   - hymeko_tensor
 
+  # Matrix-free iterative solvers for shifted skew-symmetric systems.
+  # Added 2026-08-31 by explicit instruction ("the tensor repo should own this — general
+  # mathematical things go there"), carrying the three solvers written for the structure-preserving
+  # port-Hamiltonian step: Neumann/Richardson, GMRES, and conjugate gradients on the normal
+  # equations. Its public surface is a trait over `&[f64]` and three functions, with no mesh, no
+  # physics and no HyMeKo semantics in any argument type — the same test that made `hymeko_vision`
+  # core-worthy rather than merely shared.
+  #
+  # A §6.1 discovery pass found one near-owner and REJECTED it on contract, not on taste.
+  # `hymeko_tensor::linalg` is also matrix-free and also generic, but its pinned contract is `f32`
+  # throughout with no `f64` promotion (consumers reproduce recorded numbers through it), and both
+  # of its solvers require SPD — which is precisely what a shifted skew matrix is not. Widening
+  # either would change a contract other code depends on, to serve a caller that needs neither.
+  # `hymeko_numeric_vv` was rejected for the opposite reason: it is a downstream verification client
+  # by construction and owns no kernels.
+  #
+  # DEPENDENCY-FREE BY CONTRACT, on the `hymeko_clifford` standard: `forbid(unsafe_code)`, no
+  # production `unwrap`/`expect`, an EMPTY `[dependencies]` table. Adding a dependency here is a
+  # CORE.YAML change requiring separate approval.
+  #
+  # SCOPE IS DELIBERATELY NARROW: solvers for `(I - θS)x = b`. The discrete gradient scheme that
+  # produces those systems, the port-Hamiltonian model behind it and the discretisation around it
+  # are NOT here and must not be folded in as an extension of this grant; each is a new proposal.
+  #
+  # The convergence claims are measured, not asserted: `tests/solver.rs` runs a scalable staggered
+  # Maxwell chain and pins the iteration count against the count the geometry predicts, its
+  # independence from the size of the system, and both iterative answers against a dense
+  # factorisation.
+  #
+  # ZERO REVERSE DEPENDENCIES as of 2026-08-31, deliberately. The caller these were written for is
+  # the SPATIAL port-Hamiltonian step, which does not exist yet; today's model is four states and a
+  # 4x4 direct solve is both cheaper and exact. `hymeko_simulator` therefore does NOT link this, and
+  # adding an unused dependency to make the graph look tidier would be the wrong trade. Recorded
+  # here because `hymeko_tensor` sat orphaned for months while copies of it lived in an example —
+  # an orphan that is known is a different thing from one that is not.
+  - hymeko_numerics
+
   # Build contract. `+sse4.1` makes `f32::floor` one `roundss` instead of a libm call in the
   # spline forward: ~10% on KAN, ~5.6% on HSiKAN. This file was UNTRACKED until 2026-08-19 and
   # its loss was undetectable; `hymeko_spline/tests/build_contract.rs` now fails loudly without it.
