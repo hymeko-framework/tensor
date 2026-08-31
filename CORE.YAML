@@ -18,6 +18,20 @@ core:
   # The reference standard of the whole project: `forbid(unsafe_code)`, a 0.97:1 test-to-source
   # ratio across six NAMED SCENARIO suites, the densest Design-by-Contract docs anywhere in the
   # codebase, zero production `unwrap`/`expect`. Deliberately dependency-free — keep it that way.
+  #
+  # `algebra/connection.rs` added 2026-08-31: discrete-connection gauge fixing (tree transport,
+  # cotree loop-closure residuals, curvature energy), transcribed from `nagare`'s
+  # `holonomy_estimator.rs` — the measured component behind finding F-HOLO-3, where a closed-form
+  # curvature readout reached oracle-level separation on a task a strong MLP could not. The same
+  # argument that brought `rotor_holonomy_forward` here: the topology arrives as PLAIN SLICES, so
+  # this is rotor algebra over an ordered structure and carries no graph type, mesh, dataset or
+  # model concept. The wheel generator, the sampler and the classification metric stayed on the
+  # application side; `tests/connection.rs` rebuilds a wheel of its own to check the identity.
+  #
+  # The physical reading is why it is here rather than left in a backup: on a mesh the deviation of
+  # a plaquette holonomy from the identity IS the flux through that cell, gauge fixing IS the choice
+  # of spanning tree, and a divergence-free constraint becomes an identity the representation
+  # already satisfies rather than one to enforce.
   - hymeko_clifford
 
   # Spline activation kernels — on the measured hot path of every KAN and HSiKAN run.
