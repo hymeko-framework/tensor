@@ -44,6 +44,22 @@ core:
   # dimension-specific. `tests/se_fixed.rs` exercises SE(2) through the same body precisely so that a
   # three-dimensional implementation dressed as generic could not pass.
   #
+  # `algebra/se_fixed.rs` blade table, 2026-09-02: the geometric product was recomputing the blade
+  # sign for every term, with two bit loops (`leading_zeros`, a mask, `count_ones`) per call. A rotor
+  # product is sixteen terms and a sandwich over forty; measured, `compose` was 131 ns and a pose
+  # walk over a 33-link mechanism 5.3 us -- the largest single cost in a physics step, larger than
+  # the dynamics it fed.
+  #
+  # BIT-IDENTICAL BY CONSTRUCTION, which is the only reason it is allowed here. `blade_product`
+  # answers two things: the result blade, which is `a ^ b` and always was; and the sign, which is the
+  # reordering parity times the square of each shared basis vector. This type's signature is
+  # `Signature::euclidean`, where every basis vector squares to `+1`, so that second factor is a
+  # product of ones and dropping it is exact. What remains is a function of two bit patterns, so it
+  # is a compile-time table. The loop, the order and the accumulation in `geo` are untouched --
+  # only the way `(index, sign)` is obtained changed. `tests/se_fixed.rs` is what checks the claim.
+  #
+  # `compose` 131 -> 36.8 ns, `rotate` 85.7 -> 26.6, the general rotation matrix 200.4 -> 69.3.
+  #
   # `algebra/spatial.rs` added 2026-09-01: spatial vectors — `Twist`, `Wrench`, `SpatialInertia`,
   # `ArticulatedInertia`. The Lie algebra of the group this crate already carries, in the crate that
   # carries the group. Nothing in it knows what a link, a joint or a robot is: a twist is the

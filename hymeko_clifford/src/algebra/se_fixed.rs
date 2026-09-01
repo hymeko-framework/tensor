@@ -28,7 +28,7 @@
 //! the last bit — and a caller that had recorded a pose would see it move. `tests/se_fixed.rs`
 //! checks the equality rather than assuming it.
 
-use super::blade::blade_product;
+
 use super::multivector::Multivector;
 use super::se::Se;
 use super::signature::Signature;
@@ -94,6 +94,64 @@ pub type Se3 = SeFixed<Dim3>;
 /// Rigid motions of the plane.
 pub type Se2 = SeFixed<Dim2>;
 
+/// `canonical_reorder_sign(a, b)` for every pair of blades, precomputed at compile time.
+///
+/// # Why this is exact and not an approximation of the general function
+///
+/// [`blade_product`] answers two questions: which blade the product lands on, and with what sign.
+/// The first is `a ^ b` and always was. The second is the parity of the reordering, multiplied by
+/// the square of each shared basis vector — and this type's signature is
+/// [`Signature::euclidean`], where **every** basis vector squares to `+1`. So that loop multiplies
+/// the sign by one, as many times as there are shared bits, and removing it changes nothing:
+/// multiplication by `1.0` is exact.
+///
+/// What is left is a function of two bit patterns and nothing else, so it is a table. The
+/// arithmetic in [`SeFixed::geo`] is untouched — same loop, same order, same accumulation — and only
+/// the way `(index, sign)` is obtained has changed. That is what makes the bit-for-bit contract with
+/// `Se` survive it, and `tests/se_fixed.rs` is what checks that claim rather than trusting it.
+///
+/// # Why it was worth doing
+///
+/// The sign was being recomputed for every term of every product: two bit loops with a
+/// `leading_zeros`, a mask and a `count_ones` each. A rotor product is sixteen terms and a sandwich
+/// is over forty, and forward kinematics over a thirty-three link mechanism is sixty-six products.
+/// Measured, `compose` was 131 ns and a whole pose walk 5.3 us — the largest single cost in the
+/// physics step, larger than the dynamics it was feeding.
+///
+/// Eight by eight covers `Cl(3)`; `Dim2` uses the leading four by four. The sign does not depend on
+/// the dimension at all — only on the bit patterns — so one table serves both.
+const REORDER: [[f64; 8]; 8] = build_reorder_table();
+
+/// The parity of the reordering, as a `const fn` so the table above is built by the compiler.
+const fn reorder_sign(a: usize, b: usize) -> f64 {
+    let mut remaining = a;
+    let mut inversions: u32 = 0;
+    while remaining != 0 {
+        let bit = usize::BITS as usize - 1 - remaining.leading_zeros() as usize;
+        inversions += (b & ((1usize << bit) - 1)).count_ones();
+        remaining &= !(1usize << bit);
+    }
+    if inversions % 2 == 0 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+const fn build_reorder_table() -> [[f64; 8]; 8] {
+    let mut table = [[0.0f64; 8]; 8];
+    let mut a = 0usize;
+    while a < 8 {
+        let mut b = 0usize;
+        while b < 8 {
+            table[a][b] = reorder_sign(a, b);
+            b += 1;
+        }
+        a += 1;
+    }
+    table
+}
+
 impl<D: EuclideanDim> SeFixed<D> {
     fn signature() -> Signature {
         Signature::euclidean(D::N)
@@ -125,6 +183,7 @@ impl<D: EuclideanDim> SeFixed<D> {
         let o = out.as_mut();
         // The index IS the blade bitmask, which is why it is enumerated rather than iterated over:
         // `blade_product` needs the mask, not the coefficient.
+        let _ = sig;
         for (a_idx, &av) in a.iter().enumerate() {
             if av == 0.0 {
                 continue;
@@ -133,8 +192,9 @@ impl<D: EuclideanDim> SeFixed<D> {
                 if bv == 0.0 {
                     continue;
                 }
-                let (r_idx, sign) = blade_product(a_idx, b_idx, &sig);
-                o[r_idx] += sign * av * bv;
+                // The blade index is the exclusive-or of the masks and the sign is the parity of the
+                // reordering — both looked up rather than recomputed. See [`REORDER`].
+                o[a_idx ^ b_idx] += REORDER[a_idx][b_idx] * av * bv;
             }
         }
         out
