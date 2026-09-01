@@ -31,6 +31,7 @@
 
 use super::multivector::Multivector;
 use super::se::Se;
+#[cfg(test)]
 use super::signature::Signature;
 
 /// A Euclidean dimension, and the fixed-size storage its rigid motions need.
@@ -39,6 +40,18 @@ use super::signature::Signature;
 pub trait EuclideanDim: Copy + 'static {
     /// The Euclidean dimension $n$.
     const N: usize;
+    /// Blade masks of the **even** subalgebra, ascending.
+    ///
+    /// A rotor lives here and nowhere else: it is a product of an even number of vectors, so every
+    /// odd-grade coefficient of one is structurally zero. Naming the set lets the products below
+    /// iterate the coefficients a rotor can actually have rather than all `2^n` of them and
+    /// discovering the zeros at runtime.
+    const EVEN: &'static [usize];
+    /// Blade masks of the **odd** subalgebra, ascending.
+    ///
+    /// Where a vector lives, and where a rotor sandwich passes through: `even * odd` is odd, and
+    /// `odd * even` is odd again, so the intermediate of a rotation is confined to this set.
+    const ODD: &'static [usize];
     /// $2^n$ blade coefficients, indexed by blade bitmask exactly as `Multivector` indexes them.
     type Blades: Copy + AsRef<[f64]> + AsMut<[f64]>;
     /// $n$ coordinates.
@@ -58,6 +71,9 @@ pub struct Dim3;
 
 impl EuclideanDim for Dim2 {
     const N: usize = 2;
+    // Cl(2): the scalar and e1e2 are even; e1 and e2 are odd. The even part is the complex numbers.
+    const EVEN: &'static [usize] = &[0, 3];
+    const ODD: &'static [usize] = &[1, 2];
     type Blades = [f64; 4];
     type Coords = [f64; 2];
     fn zero_blades() -> Self::Blades {
@@ -70,6 +86,10 @@ impl EuclideanDim for Dim2 {
 
 impl EuclideanDim for Dim3 {
     const N: usize = 3;
+    // Cl(3): the scalar and the three bivectors are even, and that four-dimensional even part IS the
+    // quaternions. The three vectors and the pseudoscalar are odd.
+    const EVEN: &'static [usize] = &[0, 3, 5, 6];
+    const ODD: &'static [usize] = &[1, 2, 4, 7];
     type Blades = [f64; 8];
     type Coords = [f64; 3];
     fn zero_blades() -> Self::Blades {
@@ -153,6 +173,7 @@ const fn build_reorder_table() -> [[f64; 8]; 8] {
 }
 
 impl<D: EuclideanDim> SeFixed<D> {
+    #[cfg(test)]
     fn signature() -> Signature {
         Signature::euclidean(D::N)
     }
@@ -176,6 +197,13 @@ impl<D: EuclideanDim> SeFixed<D> {
     }
 
     /// The geometric product of two blade arrays — the mirror of `Multivector::geo`.
+    /// The general geometric product over every blade.
+    ///
+    /// Kept as the REFERENCE the restricted form is checked against, not because anything on the hot
+    /// path calls it: `geo_over_agrees_with_the_general_product` in this module's tests runs both on
+    /// random rotors and vectors and demands the same bits. Without it, "the same multiply-adds in
+    /// the same order" would be a claim in a comment.
+    #[cfg(test)]
     fn geo(a: &D::Blades, b: &D::Blades) -> D::Blades {
         let sig = Self::signature();
         let (a, b) = (a.as_ref(), b.as_ref());
@@ -194,6 +222,46 @@ impl<D: EuclideanDim> SeFixed<D> {
                 }
                 // The blade index is the exclusive-or of the masks and the sign is the parity of the
                 // reordering — both looked up rather than recomputed. See [`REORDER`].
+                o[a_idx ^ b_idx] += REORDER[a_idx][b_idx] * av * bv;
+            }
+        }
+        out
+    }
+
+    /// The same product, over stated blade sets instead of over everything.
+    ///
+    /// # Why this is not an optimisation of the arithmetic
+    ///
+    /// It performs **exactly** the multiply-accumulates [`Self::geo`] performs, in exactly the same
+    /// order. What changes is which coefficients are looked at: a rotor's odd coefficients are
+    /// structurally zero, so the general loop loads them, compares them to zero and moves on, and it
+    /// does that forty-eight times out of sixty-four to reach sixteen products.
+    ///
+    /// The zero test stays. A coefficient inside the named set can still be zero — an identity rotor
+    /// has three — and skipping it there is what the general loop already did.
+    ///
+    /// # Preconditions
+    /// Every coefficient of `a` outside `a_blades`, and of `b` outside `b_blades`, must be zero.
+    /// Nothing checks it; the sets come from [`EuclideanDim`] and the callers are the group law.
+    fn geo_over(
+        a: &D::Blades,
+        a_blades: &[usize],
+        b: &D::Blades,
+        b_blades: &[usize],
+    ) -> D::Blades {
+        let (a, b) = (a.as_ref(), b.as_ref());
+        let mut out = D::zero_blades();
+        let o = out.as_mut();
+        for &a_idx in a_blades {
+            let av = a[a_idx];
+            if av == 0.0 {
+                continue;
+            }
+            for &b_idx in b_blades {
+                let bv = b[b_idx];
+                if bv == 0.0 {
+                    continue;
+                }
                 o[a_idx ^ b_idx] += REORDER[a_idx][b_idx] * av * bv;
             }
         }
@@ -230,7 +298,10 @@ impl<D: EuclideanDim> SeFixed<D> {
                 m[1 << i] = x;
             }
         }
-        let product = Self::geo(&Self::geo(&self.rotor, &mv), &Self::reverse(&self.rotor));
+        // rotor (even) * vector (odd) is odd; that times the reversed rotor (even) is odd again, and
+        // grade one of it is the answer. Three grade sets, none of them "all of them".
+        let half = Self::geo_over(&self.rotor, D::EVEN, &mv, D::ODD);
+        let product = Self::geo_over(&half, D::ODD, &Self::reverse(&self.rotor), D::EVEN);
         let mut out = D::zero_coords();
         {
             let (o, p) = (out.as_mut(), product.as_ref());
@@ -264,7 +335,7 @@ impl<D: EuclideanDim> SeFixed<D> {
             }
         }
         Self {
-            rotor: Self::geo(&self.rotor, &rhs.rotor),
+            rotor: Self::geo_over(&self.rotor, D::EVEN, &rhs.rotor, D::EVEN),
             translation,
         }
     }
@@ -393,5 +464,89 @@ impl Se3 {
             self.rotor[5],
             -self.rotor[3],
         ]
+    }
+}
+
+#[cfg(test)]
+mod grade_tests {
+    use super::*;
+
+    fn rng(state: &mut u64) -> f64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        2.0 * ((*state >> 11) as f64 / (1u64 << 53) as f64) - 1.0
+    }
+
+    /// The restricted product against the general one, bit for bit.
+    ///
+    /// `geo_over` claims to perform exactly the multiply-accumulates `geo` performs, in exactly the
+    /// same order, differing only in which coefficients it bothers to look at. That is a claim about
+    /// the last bit, so it is checked as one.
+    #[test]
+    fn geo_over_agrees_with_the_general_product() {
+        let mut state = 0x6EED_u64;
+        for case in 0..500 {
+            let x = Se3::rpy_xyz(
+                [rng(&mut state) * 3.2, rng(&mut state) * 3.2, rng(&mut state) * 3.2],
+                [rng(&mut state), rng(&mut state), rng(&mut state)],
+            );
+            let y = Se3::rpy_xyz(
+                [rng(&mut state) * 3.2, rng(&mut state) * 3.2, rng(&mut state) * 3.2],
+                [rng(&mut state), rng(&mut state), rng(&mut state)],
+            );
+
+            // even * even, which is what `compose` does
+            assert_eq!(
+                SeFixed::<Dim3>::geo_over(&x.rotor, Dim3::EVEN, &y.rotor, Dim3::EVEN),
+                SeFixed::<Dim3>::geo(&x.rotor, &y.rotor),
+                "case {case}: even times even"
+            );
+
+            // even * odd and odd * even, which is what `rotate` does
+            let mut v = [0.0f64; 8];
+            v[1] = rng(&mut state);
+            v[2] = rng(&mut state);
+            v[4] = rng(&mut state);
+            let half_fast = SeFixed::<Dim3>::geo_over(&x.rotor, Dim3::EVEN, &v, Dim3::ODD);
+            let half_slow = SeFixed::<Dim3>::geo(&x.rotor, &v);
+            assert_eq!(half_fast, half_slow, "case {case}: even times odd");
+
+            let back = SeFixed::<Dim3>::reverse(&x.rotor);
+            assert_eq!(
+                SeFixed::<Dim3>::geo_over(&half_fast, Dim3::ODD, &back, Dim3::EVEN),
+                SeFixed::<Dim3>::geo(&half_slow, &back),
+                "case {case}: odd times even"
+            );
+        }
+    }
+
+    /// A rotor really does live in the even subalgebra, and a vector in the odd one.
+    ///
+    /// The precondition `geo_over` relies on, checked rather than assumed — if a constructor ever
+    /// put a coefficient outside its grade set, the restricted product would silently drop it.
+    #[test]
+    fn the_grade_sets_hold_everything_the_constructors_produce() {
+        let mut state = 0x9AB_u64;
+        for case in 0..500 {
+            let x = Se3::rpy_xyz(
+                [rng(&mut state) * 3.2, rng(&mut state) * 3.2, rng(&mut state) * 3.2],
+                [rng(&mut state), rng(&mut state), rng(&mut state)],
+            );
+            for (i, &c) in x.rotor.iter().enumerate() {
+                if !Dim3::EVEN.contains(&i) {
+                    assert_eq!(c, 0.0, "case {case}: rotor has an odd component at blade {i}");
+                }
+            }
+            let axis = [rng(&mut state), rng(&mut state), rng(&mut state)];
+            let y = Se3::axis_angle(axis, rng(&mut state) * 6.0);
+            for (i, &c) in y.rotor.iter().enumerate() {
+                if !Dim3::EVEN.contains(&i) {
+                    assert_eq!(c, 0.0, "case {case}: axis_angle produced blade {i}");
+                }
+            }
+        }
+        assert_eq!(Dim3::EVEN.len() + Dim3::ODD.len(), 8);
+        assert_eq!(Dim2::EVEN.len() + Dim2::ODD.len(), 4);
     }
 }
