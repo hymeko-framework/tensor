@@ -131,7 +131,7 @@ const fn reorder_sign(a: usize, b: usize) -> f64 {
         inversions += (b & ((1usize << bit) - 1)).count_ones();
         remaining &= !(1usize << bit);
     }
-    if inversions % 2 == 0 {
+    if inversions.is_multiple_of(2) {
         1.0
     } else {
         -1.0
