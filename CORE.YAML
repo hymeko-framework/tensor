@@ -164,6 +164,24 @@ core:
   # here because `hymeko_tensor` sat orphaned for months while copies of it lived in an example —
   # an orphan that is known is a different thing from one that is not.
   - hymeko_numerics
+  #
+  # `port_hamiltonian.rs` added 2026-09-02: port-Hamiltonian systems whose interconnection `J` is the
+  # signed incidence of a HYPERGRAPH rather than a matrix somebody wrote down. Each port contributes
+  # `w (e_u e_v^T - e_v e_u^T)` over its sources and targets, which is antisymmetric term by term, so
+  # skew-symmetry — and with it the energy balance — is a consequence of the G-SPHF sign convention
+  # (`-1` source, `+1` target) rather than a property checked afterwards.
+  #
+  # It belongs here and not in an application because the argument types are `&[f64]` and index
+  # lists, and because the system it steps is exactly the shifted skew-symmetric one this crate's
+  # solvers were written for: `S = Q^(1/2)(J - R)Q^(1/2)`, which the crate doc already named before
+  # anything produced it.
+  #
+  # The unification is TESTED, not asserted. `tests/port_hamiltonian.rs` shows a three-edge chain
+  # reproducing, entry for entry, the 4x4 that `hymeko_simulator`'s driven-RLC reduction writes by
+  # hand; and canonical mechanics coming out as a perfect matching, `J = [[0, I], [-I, 0]]`. The
+  # simulator pins the same correspondence from its own side against the sign rule written out, so
+  # neither can drift without one of the two failing.
+
 
   # Build contract. `+sse4.1` makes `f32::floor` one `roundss` instead of a libm call in the
   # spline forward: ~10% on KAN, ~5.6% on HSiKAN. This file was UNTRACKED until 2026-08-19 and

@@ -58,6 +58,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod port_hamiltonian;
+
+pub use port_hamiltonian::{Interconnection, NormalisedFlow, Port, PortHamiltonian};
+
 /// A linear operator applied to a vector. Matrix-free: a discrete curl is a stencil, and writing it
 /// out as a matrix would spend memory on structure that is already known.
 pub trait Operator {
