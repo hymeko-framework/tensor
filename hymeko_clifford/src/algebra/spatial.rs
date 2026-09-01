@@ -99,37 +99,51 @@ fn add_scaled(a: &mut [f64; 9], b: &[f64; 9], s: f64) {
     }
 }
 
-/// The rotation of `x` as a row-major 3x3, from the rotor's quaternion in closed form.
-///
-/// [`Se3::rotation_matrix_into`] answers the same question by rotating each basis vector, and each
-/// of those is a rotor sandwich: two geometric products over eight-component multivectors, about
-/// 128 multiplies. Three columns is nearly four hundred, which measured as the single largest cost
-/// in a spatial frame change — larger than the congruence it was being computed for.
-///
-/// The quaternion form is about twenty. It is NOT bit-identical to the sandwich, which is why it
-/// lives here as a private helper rather than replacing the general method: `SeFixed`'s matrix is
-/// pinned bit-for-bit against `Se`'s by `tests/se_fixed.rs`, and that contract is worth more than
-/// the speed. Nothing in this module pins the congruence to a stored number, so the last bit is
-/// free to differ; what it must not do is differ by more than rounding, and
-/// `the_fast_rotation_matrix_agrees_with_the_general_one` holds it to that.
+/// The rotation of `x` as a row-major 3x3, through [`Se3::rotation_matrix_quaternion_into`].
 #[inline]
 fn rotation_of(x: &Se3) -> [f64; 9] {
-    let [w, i, j, k] = x.quaternion();
-    let (i2, j2, k2) = (i + i, j + j, k + k);
-    let (wi, wj, wk) = (w * i2, w * j2, w * k2);
-    let (ii, ij, ik) = (i * i2, i * j2, i * k2);
-    let (jj, jk, kk) = (j * j2, j * k2, k * k2);
-    [
-        1.0 - (jj + kk),
-        ij - wk,
-        ik + wj,
-        ij + wk,
-        1.0 - (ii + kk),
-        jk - wi,
-        ik - wj,
-        jk + wi,
-        1.0 - (ii + jj),
-    ]
+    let mut r = [0.0f64; 9];
+    x.rotation_matrix_quaternion_into(&mut r);
+    r
+}
+
+impl Se3 {
+    /// The rotation as a row-major 3x3, taken from the rotor's quaternion in closed form.
+    ///
+    /// **This is not [`SeFixed::rotation_matrix_into`], and it must not be used where that one's
+    /// contract matters.** They compute the same rotation and differ in the last bit;
+    /// `rotation_matrix_into` is pinned bit-for-bit against `Se` by `tests/se_fixed.rs`, and a
+    /// consumer holding a recorded pose relies on that. This one is pinned only to rounding, by
+    /// `the_fast_rotation_matrix_agrees_with_the_general_one`.
+    ///
+    /// What it buys: the general method answers by rotating each basis vector, and each of those is
+    /// a rotor sandwich — two geometric products over eight-component multivectors, about 128
+    /// multiplies, nearly 400 for three columns. This is about twenty.
+    ///
+    /// Reach for it when transforming vectors IN BULK through one fixed pose — a support function
+    /// called sixty times inside a collision query, a spatial inertia moved between frames. Extract
+    /// the matrix once, then every vector costs nine multiplies instead of a sandwich. For a
+    /// handful of vectors, [`SeFixed::rotate`] is simpler and the difference does not matter.
+    ///
+    /// # Panics
+    /// If `out` is shorter than nine.
+    pub fn rotation_matrix_quaternion_into(&self, out: &mut [f64]) {
+        assert!(out.len() >= 9, "out must hold nine entries");
+        let [w, i, j, k] = self.quaternion();
+        let (i2, j2, k2) = (i + i, j + j, k + k);
+        let (wi, wj, wk) = (w * i2, w * j2, w * k2);
+        let (ii, ij, ik) = (i * i2, i * j2, i * k2);
+        let (jj, jk, kk) = (j * j2, j * k2, k * k2);
+        out[0] = 1.0 - (jj + kk);
+        out[1] = ij - wk;
+        out[2] = ik + wj;
+        out[3] = ij + wk;
+        out[4] = 1.0 - (ii + kk);
+        out[5] = jk - wi;
+        out[6] = ik - wj;
+        out[7] = jk + wi;
+        out[8] = 1.0 - (ii + jj);
+    }
 }
 
 /// `R . a . R^T`, the congruence that moves a 3x3 block between frames.
