@@ -59,6 +59,7 @@
 #![warn(missing_docs)]
 
 pub mod port_hamiltonian;
+pub mod diffusion;
 
 pub use port_hamiltonian::{Interconnection, NormalisedFlow, Port, PortHamiltonian};
 
