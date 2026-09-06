@@ -10,4 +10,7 @@ members = [
     # crates, and nothing depends on it — `hymeko_numeric_vv/tests/dependency_direction.rs` proves
     # that by parsing every manifest here rather than trusting the comment.
     "hymeko_numeric_vv",
+    # Python bindings (pyo3). Downstream by construction, like hymeko_numeric_vv: it depends on the
+    # production crates and nothing depends on it, so `pyo3` never enters a core crate's graph.
+    "hymeko_tensor_py",
 ]

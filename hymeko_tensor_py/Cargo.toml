@@ -1,0 +1,30 @@
+# Python bindings for the Tensor pillar.
+#
+# DIRECTION IS ONE-WAY, on the `hymeko_numeric_vv` precedent: this package depends on the production crates and no
+# production crate may name it. It exists so a Python consumer calls the COMPILED owner instead of growing a second
+# implementation in Python -- which is exactly what happened once already (`renyi.rs` functions copied into a
+# `nagare` example, retired 2026-08-19).
+#
+# WHY THE DEPENDENCY LIVES HERE AND NOT IN CORE. `pyo3` is a dependency, and CORE.YAML §1 treats adding one to a
+# core crate as a core edit. Keeping every FFI concern in this downstream package leaves `hymeko_tensor`
+# dependency-free and `forbid(unsafe_code)` exactly as it is: not one line of it changes to be callable from Python.
+[package]
+name = "hymeko_tensor_py"
+version = "0.1.0"
+edition = "2021"
+description = "Python (pyo3) bindings for the hymeko_tensor pillar: matrix-based Renyi-2 estimators and dense linear algebra."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "hymeko_tensor_py"
+# `cdylib` is what Python imports; `rlib` keeps the validation module unit-testable by `cargo test`
+# without an interpreter in the loop.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+hymeko_tensor = { path = "../hymeko_tensor" }
+# `extension-module` so the built object does NOT link libpython (the interpreter supplies the symbols),
+# `abi3-py39` so one wheel serves every CPython >= 3.9 instead of one per minor version.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
