@@ -1,0 +1,19 @@
+# Build with: maturin build --release -m hymeko_tensor_py/pyproject.toml
+#
+# `abi3-py39` in Cargo.toml means ONE wheel serves every CPython >= 3.9, so a consumer is not pinned to the
+# interpreter this was built against. No runtime dependencies: the module takes and returns plain Python
+# sequences of floats, and a NumPy caller converts explicitly on its own side.
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "hymeko-tensor-py"
+version = "0.1.0"
+description = "Python bindings for the hymeko_tensor pillar: matrix-based Renyi-2 estimators and dense linear algebra."
+requires-python = ">=3.9"
+classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: Implementation :: CPython"]
+
+[tool.maturin]
+module-name = "hymeko_tensor_py"
+features = ["pyo3/extension-module"]
