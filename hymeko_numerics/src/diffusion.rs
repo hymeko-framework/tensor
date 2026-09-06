@@ -53,6 +53,49 @@ impl Diffusion {
             .map(|(v, c)| v * c * c)
             .sum::<f64>()
     }
+    /// Transfer concentrations using a complete coupling of source/target capacities.
+    /// Each tuple is (source index, target index, shared capacity). Both margins
+    /// must match their capacities; no quantity is silently discarded or created.
+    pub fn remap(
+        &self,
+        state: &[f64],
+        target: &Self,
+        overlaps: &[(usize, usize, f64)],
+    ) -> Result<Vec<f64>, &'static str> {
+        if state.len() != self.len() || state.iter().any(|x| !x.is_finite() || *x < 0.0) {
+            return Err("invalid source concentration");
+        }
+        let mut source_coverage = vec![0.0; self.len()];
+        let mut target_coverage = vec![0.0; target.len()];
+        let mut next = vec![0.0; target.len()];
+        for &(a, b, volume) in overlaps {
+            if a >= self.len() || b >= target.len() || !volume.is_finite() || volume <= 0.0 {
+                return Err("invalid transfer weight");
+            }
+            source_coverage[a] += volume;
+            target_coverage[b] += volume;
+            next[b] += volume * state[a];
+        }
+        for (coverage, capacity) in [
+            (&source_coverage, &self.capacity),
+            (&target_coverage, &target.capacity),
+        ] {
+            if coverage
+                .iter()
+                .zip(capacity)
+                .any(|(v, c)| !v.is_finite() || (v - c).abs() > c * 1e-12)
+            {
+                return Err("transfer does not cover both capacity partitions");
+            }
+        }
+        for (value, capacity) in next.iter_mut().zip(&target.capacity) {
+            *value /= capacity;
+        }
+        if next.iter().any(|v| !v.is_finite()) {
+            return Err("transfer concentration overflow");
+        }
+        Ok(next)
+    }
     /// Backward Euler. Reject invalid input or failed solve without changing state.
     pub fn step(&self, state: &mut [f64], dt: f64, tolerance: f64) -> Result<Report, &'static str> {
         if state.len() != self.len()
@@ -102,6 +145,31 @@ impl Operator for Diffusion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conservative_remap_preserves_quantity_and_constants_but_averages_detail() {
+        let fine = Diffusion::new(vec![1.0, 3.0], vec![]).unwrap();
+        let coarse = Diffusion::new(vec![4.0], vec![]).unwrap();
+        let down = [(0, 0, 1.0), (1, 0, 3.0)];
+        let up = [(0, 0, 1.0), (0, 1, 3.0)];
+        let mean = fine.remap(&[4.0, 0.0], &coarse, &down).unwrap();
+        assert_eq!(mean, vec![1.0]);
+        assert_eq!(coarse.quantity(&mean), 4.0);
+        assert!(coarse.energy(&mean) < fine.energy(&[4.0, 0.0]));
+        assert_eq!(coarse.remap(&mean, &fine, &up).unwrap(), vec![1.0, 1.0]);
+        let constant = fine.remap(&[2.0, 2.0], &coarse, &down).unwrap();
+        assert_eq!(coarse.remap(&constant, &fine, &up).unwrap(), vec![2.0, 2.0]);
+        for bad in [
+            vec![],
+            vec![(0, 0, 4.0)],
+            vec![(2, 0, 1.0)],
+            vec![(0, 0, f64::NAN)],
+            vec![(0, 0, -1.0)],
+        ] {
+            assert!(fine.remap(&[4.0, 0.0], &coarse, &bad).is_err());
+        }
+        assert!(fine.remap(&[4.0], &coarse, &down).is_err());
+        assert!(fine.remap(&[-1.0, 0.0], &coarse, &down).is_err());
+    }
     #[test]
     fn unequal_capacities_match_closed_form_backward_euler() {
         let op = Diffusion::new(vec![1.0, 2.0], vec![(0, 1, 3.0)]).unwrap();
