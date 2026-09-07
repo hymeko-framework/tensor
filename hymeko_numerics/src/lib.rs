@@ -195,7 +195,8 @@ pub fn gmres<O: Operator>(
                     w[i] -= h[j][k] * v[j][i];
                 }
             }
-            h[k + 1][k] = norm(&w);
+            let arnoldi_norm = norm(&w);
+            h[k + 1][k] = arnoldi_norm;
 
             // apply the rotations accumulated so far, then annihilate the new subdiagonal
             for j in 0..k {
@@ -217,14 +218,11 @@ pub fn gmres<O: Operator>(
             g[k] *= cs[k];
             used = k + 1;
 
-            let breakdown = h[k + 1][k].abs() < 1e-300;
+            let breakdown = arnoldi_norm < 1e-300;
             if breakdown || g[k + 1].abs() / scale <= tol {
-                if !breakdown {
-                    v.push(w.iter().map(|t| t / denominator.max(1e-300)).collect());
-                }
                 break;
             }
-            v.push(w.iter().map(|t| t / h[k + 1][k].max(1e-300)).collect());
+            v.push(w.iter().map(|t| t / arnoldi_norm).collect());
         }
 
         // back-substitute for the correction and add it

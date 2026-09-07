@@ -153,28 +153,11 @@ fn dissipation_only_helps() {
 // ─── the stiff regime ───────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn the_stiff_regime_needs_the_structure_not_a_general_krylov_method() {
-    // A step deliberately longer than the fastest mode: rho > 1, so the Neumann series diverges.
-    // This is not a corner case — it is the reason to be implicit at all.
-    //
-    // MEASURED, 4096 unknowns, tolerance 1e-12:
-    //
-    //     rho    Neumann     GMRES(60)                    CG-normal
-    //       2    diverges    219 iter, 10.3 ms            26 iter,  0.4 ms
-    //       6    diverges    800 iter, FAILED at 2.8e-6   75 iter,  1.0 ms
-    //      20    diverges    800 iter, FAILED at 1.8e-1  254 iter,  3.1 ms
-    //
-    // GMRES is not broken here, and that is the point: with no dissipation the eigenvalues of A lie
-    // on a vertical segment from 1 - i*rho to 1 + i*rho, the symmetric part is exactly I, and
-    // Elman's bound gives a per-iteration reduction of sqrt(1 - 1/(1 + rho^2)) = 0.949 at rho = 6 —
-    // about five hundred iterations for twelve digits, with a Krylov basis growing the whole way.
-    // The measurement agrees with the bound, so the slowness is the geometry, not the code.
-    //
-    // The structure gives a better route. A is NORMAL and A^T = I + theta*K, so A^T A = I +
-    // theta^2 K^T K is symmetric positive definite with condition number 1 + rho^2 — growing like
-    // rho^2, not rho^4. Squaring is the usual mistake and is not one here: the measured counts grow
-    // as 26 -> 75 -> 254 for rho 2 -> 6 -> 20, i.e. LINEARLY in the stiffness, which is what
-    // sqrt(1 + rho^2) predicts.
+fn the_stiff_regime_is_solved_by_both_implicit_methods() {
+    // The old comparison accidentally measured GMRES(1): its Arnoldi breakdown
+    // check read the post-Givens zero. Those timing/ranking claims are withdrawn.
+    // Check both actual residuals at the same tolerance instead of requiring a
+    // solver to remain slower. Richardson must still reject this stiff regime.
     let rho = 6.0;
     let theta = rho / 2.0;
     let s = MaxwellChain { cells: 2_048, gamma: 1.0, sigma: 0.0 };
@@ -199,9 +182,12 @@ fn the_stiff_regime_needs_the_structure_not_a_general_krylov_method() {
         "and the reported residual must be the real one"
     );
     assert!(
-        normal.iterations * 3 < krylov.iterations || !krylov.converged,
-        "exploiting normality must beat a general Krylov method here:          CG-normal {normal:?} vs GMRES {krylov:?}"
+        krylov.converged,
+        "correct GMRES must carry this stiff step: {krylov:?}"
     );
+    assert!(relative_residual(&s, theta, &b, &by_gmres) <= tol * 10.0);
+    assert!(x.iter().zip(&by_gmres).all(|(a, b)| (a - b).abs() < 1e-10));
+    println!("stiff solve: CG-normal {normal:?}; GMRES {krylov:?}");
 }
 
 #[test]
@@ -325,4 +311,21 @@ fn gaussian_elimination(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64
         x[row] = acc / a[row][row];
     }
     Some(x)
+}
+
+#[test]
+fn gmres_keeps_the_second_arnoldi_vector_for_a_two_state_rotation() {
+    let operator = MaxwellChain {
+        cells: 1,
+        gamma: 1.0,
+        sigma: 0.0,
+    };
+    let b = [1.0, 0.0];
+    let mut x = [0.0; 2];
+    let report = gmres(&operator, 1.0, &b, &mut x, 1e-12, 2, 2);
+    assert!(report.converged, "{report:?}");
+    assert_eq!(report.iterations, 2);
+    assert!(relative_residual(&operator, 1.0, &b, &x) < 1e-12);
+    assert!((x[0] - 0.5).abs() < 1e-12);
+    assert!((x[1] + 0.5).abs() < 1e-12);
 }
