@@ -202,10 +202,18 @@ impl<const D: usize> NurbsCurve<D> {
         {
             return Err(NurbsError::Data);
         }
+        Self::validate_multiplicity(degree, knots, [knots[degree], knots[n]])
+    }
+
+    fn validate_multiplicity(
+        degree: usize,
+        knots: &[f64],
+        domain: [f64; 2],
+    ) -> Result<(), NurbsError> {
         let mut run = 1;
         for pair in knots.windows(2) {
             run = if pair[0] == pair[1] { run + 1 } else { 1 };
-            let internal = pair[1] > knots[degree] && pair[1] < knots[n];
+            let internal = pair[1] > domain[0] && pair[1] < domain[1];
             if run > degree + usize::from(!internal) {
                 return Err(NurbsError::Data);
             }
