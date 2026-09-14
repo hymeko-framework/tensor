@@ -2,3 +2,6 @@
 Cargo.lock
 **/*.rs.bk
 .DS_Store
+
+# Task reports are archived to Samba after each task.
+reports/
