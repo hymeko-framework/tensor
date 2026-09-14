@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # Claude Code — Operating Contract (`tensor` repository)
 
 **This repository is the HyMeKo FRAMEWORK.** `nagare` and any future application link its crates as
