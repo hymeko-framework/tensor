@@ -26,8 +26,8 @@ pub use connection::{
 };
 pub use multivector::Multivector;
 pub use rotor::{
-    cayley_rotor_backward, cayley_rotor_forward, cayley_to_unit_quat, quat_conjugate, quat_mul,
-    quat_rotate, rotor_holonomy_backward, rotor_holonomy_forward,
+    cayley_rotor_backward, cayley_rotor_forward, cayley_to_unit_quat, q_at, quat_conjugate,
+    quat_mul, quat_rotate, rotor_holonomy_backward, rotor_holonomy_forward,
 };
 pub use se::Se;
 pub use se_fixed::{Dim2, Dim3, EuclideanDim, Se2, Se3, SeFixed};

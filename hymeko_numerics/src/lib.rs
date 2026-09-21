@@ -83,11 +83,33 @@ pub struct Report {
     pub converged: bool,
 }
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
+/// Euclidean inner product `⟨a, b⟩`.
+///
+/// `pub` because the callers wrote it out themselves: a 2026-09-21 census found this body
+/// byte-identical in Nagare's `src/vision/sbsh_solve.rs`, privately, next to a `norm` that was
+/// also identical. A residual norm that a solver and its caller compute by two separate copies of
+/// the same expression is one edit away from disagreeing about convergence.
+///
+/// # Preconditions
+/// `a.len() == b.len()`. A shorter `b` silently truncates the sum — `zip` stops at the shorter
+/// side — so the caller owns the length check. This is deliberately not asserted: the Krylov
+/// solvers here call it per iteration on slices they allocated themselves.
+///
+/// # Postconditions
+/// Left-to-right summation in slice order, `f64` throughout. Not Kahan-compensated: the vectors
+/// these solvers carry are `dim()`-sized residuals, well under the ~10⁴ terms at which §5 requires
+/// compensation, and changing the summation order would move every recorded residual.
+pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-fn norm(a: &[f64]) -> f64 {
+/// Euclidean norm `‖a‖`.
+///
+/// # Postconditions
+/// `dot(a, a).sqrt()`, exactly. Squaring before the root means the intermediate can overflow for
+/// components above `f64::MAX.sqrt()` ≈ 1.3·10¹⁵⁴ where a hypot-style scaling would not; that
+/// trade is kept because it is what every recorded residual in this archive was computed with.
+pub fn norm(a: &[f64]) -> f64 {
     dot(a, a).sqrt()
 }
 
