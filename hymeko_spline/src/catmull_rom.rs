@@ -106,9 +106,15 @@ fn block_stride(n: usize, channels: usize) -> usize {
 }
 
 /// Cache from Catmull--Rom forward needed by the closed-form backward.
+///
+/// It holds **only what the backward cannot recompute**: five bytes per element. The segment
+/// index and the local coordinate are functions of the clamped input ([`segment`]), so the backward
+/// recomputes them with the forward's own expression instead of reading them from a tape; the
+/// result is bit-identical. Until 2026-09-25 both were stored as well, ten bytes per element.
 #[derive(Debug, Clone)]
 pub struct CatmullRomCache {
-    /// Clamped input values, flat `(n, channels)`.
+    /// Clamped input values, flat `(n, channels)`. The segment of each element is
+    /// [`segment`] of this value.
     pub x_clamped: Vec<f32>,
     /// Whether each raw input lay **inside the closed interval** `[-1, 1]`, flat `(n, channels)`.
     ///
@@ -120,20 +126,36 @@ pub struct CatmullRomCache {
     /// The interval is **closed**, so `x == ±1` is interior and keeps the interior derivative the
     /// historical implementation gave it.
     pub interior: Vec<bool>,
-    /// Segment index per input element.
-    ///
-    /// `u8`, not `usize`: the value is a CR segment index bounded by `grid - 2`,
-    /// and every grid in this codebase is 5-6. Storing it in 8 bytes cost 8x the
-    /// cache traffic of the buffer for no reachable range.
-    pub indices: Vec<u8>,
-    /// Local segment coordinate per input element.
-    pub t: Vec<f32>,
     /// Number of rows in the flat input.
     pub n: usize,
     /// Channel count.
     pub channels: usize,
     /// Number of CR control points per channel.
     pub grid: usize,
+}
+
+impl CatmullRomCache {
+    /// The `f32` scalars this tape retains: the clamped inputs. The `interior` mask is `bool`, not
+    /// an `f32`, so it is not counted.
+    #[must_use]
+    pub fn retained_floats(&self) -> usize {
+        self.x_clamped.len()
+    }
+}
+
+/// The CR segment of a clamped input: `(i, t)` with `u = (xc + 1) · span`, `i = min(⌊u⌋, grid − 2)`
+/// and `t = u − i`.
+///
+/// **The one expression** the forward evaluates and the backward recomputes, which is what makes
+/// the recomputed segment bit-identical to the forward's.
+///
+/// # Preconditions
+/// `xc ∈ [-1, 1]`, `span == 0.5 · (grid − 1)`, `grid >= 3`.
+#[inline(always)]
+fn segment(xc: f32, span: f32, grid: usize) -> (usize, f32) {
+    let u = (xc + 1.0) * span;
+    let i = (u.floor() as usize).min(grid - 2);
+    (i, u - i as f32)
 }
 
 /// Result of a Catmull--Rom backward pass.
@@ -154,7 +176,7 @@ pub struct ChebyshevCrBackward {
     pub grad_coef: Vec<f32>,
 }
 
-/// The four per-element buffers [`catmull_rom_forward`] fills for a single row.
+/// The per-element buffers [`catmull_rom_forward`] fills for a block of rows.
 ///
 /// Bundled into a struct so the shared row kernel takes four arguments instead of
 /// seven (§6.5 #6) and so the sequential and parallel paths call *one*
@@ -163,8 +185,6 @@ struct ForwardRow<'a> {
     out: &'a mut [f32],
     x_clamped: &'a mut [f32],
     interior: &'a mut [bool],
-    indices: &'a mut [u8],
-    t: &'a mut [f32],
 }
 
 /// Evaluate the CR spline for every element of a whole block of rows.
@@ -186,9 +206,7 @@ fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w:
             let e = base_e + ch;
             let raw = x_block[e];
             let xc = raw.clamp(-1.0, 1.0);
-            let u = (xc + 1.0) * span;
-            let i = (u.floor() as usize).min(grid - 2);
-            let t = u - i as f32;
+            let (i, t) = segment(xc, span, grid);
             let weights = cr_weights(t);
             let control = cr_control_indices(i, grid);
             let base = ch * grid;
@@ -199,8 +217,6 @@ fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w:
             w.x_clamped[e] = xc;
             // Closed interval: `±1` is interior, matching the guard this replaces.
             w.interior[e] = (-1.0..=1.0).contains(&raw);
-            w.indices[e] = i as u8;
-            w.t[e] = t;
         }
     }
 }
@@ -231,22 +247,12 @@ pub fn catmull_rom_forward(
         grid >= 3,
         "Catmull--Rom needs at least 3 control points, got {grid}"
     );
-    // `indices` is `u8`. The stored value is `min(floor(u), grid - 2)`, so it fits
-    // exactly when `grid - 2 <= u8::MAX`. Grids in this codebase run 3-6, so the stored
-    // value is at most 4; this is the guard that turns a silent wraparound into a failed
-    // precondition if that ever stops being true.
-    assert!(
-        grid - 2 <= u8::MAX as usize,
-        "grid {grid} exceeds the u8 segment-index range; widen CatmullRomCache::indices"
-    );
     assert_eq!(x.len(), n * channels);
     assert_eq!(coef.len(), channels * grid);
 
     let mut out = vec![0.0; x.len()];
     let mut x_clamped = vec![0.0; x.len()];
     let mut interior = vec![false; x.len()];
-    let mut indices = vec![0u8; x.len()];
-    let mut ts = vec![0.0; x.len()];
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
     // parallel result is bit-identical to the sequential one at any thread count.
@@ -257,10 +263,8 @@ pub fn catmull_rom_forward(
         out.par_chunks_mut(stride)
             .zip(x_clamped.par_chunks_mut(stride))
             .zip(interior.par_chunks_mut(stride))
-            .zip(indices.par_chunks_mut(stride))
-            .zip(ts.par_chunks_mut(stride))
             .zip(x.par_chunks(stride))
-            .for_each(|(((((out_b, xc_b), in_b), idx_b), t_b), x_b)| {
+            .for_each(|(((out_b, xc_b), in_b), x_b)| {
                 forward_block(
                     coef,
                     grid,
@@ -270,8 +274,6 @@ pub fn catmull_rom_forward(
                         out: out_b,
                         x_clamped: xc_b,
                         interior: in_b,
-                        indices: idx_b,
-                        t: t_b,
                     },
                 );
             });
@@ -285,8 +287,6 @@ pub fn catmull_rom_forward(
                 out: &mut out,
                 x_clamped: &mut x_clamped,
                 interior: &mut interior,
-                indices: &mut indices,
-                t: &mut ts,
             },
         );
     }
@@ -301,8 +301,6 @@ pub fn catmull_rom_forward(
             out: &mut out,
             x_clamped: &mut x_clamped,
             interior: &mut interior,
-            indices: &mut indices,
-            t: &mut ts,
         },
     );
 
@@ -311,8 +309,6 @@ pub fn catmull_rom_forward(
         CatmullRomCache {
             x_clamped,
             interior,
-            indices,
-            t: ts,
             n,
             channels,
             grid,
@@ -320,16 +316,13 @@ pub fn catmull_rom_forward(
     )
 }
 
-/// One block's slices as the six-way zip yields them.
+/// One block's slices as the five-way zip yields them.
 ///
 /// Named so the sequential and parallel branches can share a single closure: both
 /// `chunks_mut` and `par_chunks_mut` produce this same nesting, and the shared
 /// closure is what guarantees the two paths run identical arithmetic.
 type BackwardZip<'a> = (
-    (
-        (((&'a mut [f32], &'a [f32]), &'a [u8]), &'a [f32]),
-        &'a [bool],
-    ),
+    (((&'a mut [f32], &'a [f32]), &'a [f32]), &'a [bool]),
     &'a mut [f32],
 );
 
@@ -341,8 +334,8 @@ type BackwardZip<'a> = (
 struct BackwardChunk<'a> {
     grad_x: &'a mut [f32],
     grad_y: &'a [f32],
-    indices: &'a [u8],
-    t: &'a [f32],
+    /// Clamped inputs from the forward; the segment is recomputed from them ([`segment`]).
+    x_clamped: &'a [f32],
     /// Per-element interior mask from the forward; see [`CatmullRomCache::interior`].
     interior: &'a [bool],
 }
@@ -366,6 +359,7 @@ fn backward_chunk(
     grad_coef: &mut [f32],
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
+    // `du/dx` is the forward's `span`: one value, named for each of its two uses.
     let du_dx = 0.5 * (grid - 1) as f32;
     // Rows outer, channels inner — the channel index must not become an integer
     // division per element (that cost ~24 % when first written that way).
@@ -374,9 +368,9 @@ fn backward_chunk(
         for ch in 0..channels {
             let e = base_e + ch;
             let gy = c.grad_y[e];
-            let t = c.t[e];
+            let (i, t) = segment(c.x_clamped[e], du_dx, grid);
             let weights = cr_weights(t);
-            let control = cr_control_indices(c.indices[e] as usize, grid);
+            let control = cr_control_indices(i, grid);
             let base = ch * grid;
             for k in 0..4 {
                 grad_coef[base + control[k]] += gy * weights[k];
@@ -440,7 +434,7 @@ pub fn catmull_rom_backward(
     let blocks = grad_x.len().div_ceil(stride).max(1);
     let mut partials = vec![0.0f32; blocks * coef.len()];
 
-    let kernel = |(((((gx, gy), indices), t), interior), local): BackwardZip<'_>| {
+    let kernel = |((((gx, gy), x_clamped), interior), local): BackwardZip<'_>| {
         backward_chunk(
             coef,
             cache.channels,
@@ -448,8 +442,7 @@ pub fn catmull_rom_backward(
             BackwardChunk {
                 grad_x: gx,
                 grad_y: gy,
-                indices,
-                t,
+                x_clamped,
                 interior,
             },
             local,
@@ -461,8 +454,7 @@ pub fn catmull_rom_backward(
         grad_x
             .par_chunks_mut(stride)
             .zip(grad_y.par_chunks(stride))
-            .zip(cache.indices.par_chunks(stride))
-            .zip(cache.t.par_chunks(stride))
+            .zip(cache.x_clamped.par_chunks(stride))
             .zip(cache.interior.par_chunks(stride))
             .zip(partials.par_chunks_mut(coef.len()))
             .for_each(kernel);
@@ -470,8 +462,7 @@ pub fn catmull_rom_backward(
         grad_x
             .chunks_mut(stride)
             .zip(grad_y.chunks(stride))
-            .zip(cache.indices.chunks(stride))
-            .zip(cache.t.chunks(stride))
+            .zip(cache.x_clamped.chunks(stride))
             .zip(cache.interior.chunks(stride))
             .zip(partials.chunks_mut(coef.len()))
             .for_each(kernel);
@@ -481,8 +472,7 @@ pub fn catmull_rom_backward(
     grad_x
         .chunks_mut(stride)
         .zip(grad_y.chunks(stride))
-        .zip(cache.indices.chunks(stride))
-        .zip(cache.t.chunks(stride))
+        .zip(cache.x_clamped.chunks(stride))
         .zip(cache.interior.chunks(stride))
         .zip(partials.chunks_mut(coef.len()))
         .for_each(kernel);
@@ -828,9 +818,12 @@ mod tests {
             for ch in 0..cache.channels {
                 let e = row * cache.channels + ch;
                 let gy = grad_y[e];
-                let w = cr_weights(cache.t[e]);
-                let dw = cr_weight_derivatives(cache.t[e]);
-                let control = cr_control_indices(cache.indices[e] as usize, cache.grid);
+                let u = (cache.x_clamped[e] + 1.0) * 0.5 * (cache.grid - 1) as f32;
+                let i = (u.floor() as usize).min(cache.grid - 2);
+                let t = u - i as f32;
+                let w = cr_weights(t);
+                let dw = cr_weight_derivatives(t);
+                let control = cr_control_indices(i, cache.grid);
                 let base = ch * cache.grid;
                 for k in 0..4 {
                     grad_coef[base + control[k]] += gy * w[k];
@@ -862,8 +855,19 @@ mod tests {
             let (want_out, want_xc, want_idx, want_t) = naive_forward(&coef, &x, n, channels, grid);
             assert_eq!(out, want_out, "n={n}: output must be bit-exact");
             assert_eq!(cache.x_clamped, want_xc, "n={n}: clamped input");
-            assert_eq!(cache.indices, want_idx, "n={n}: segment indices");
-            assert_eq!(cache.t, want_t, "n={n}: segment coordinates");
+            // The cache no longer stores the segment; the one expression both passes evaluate
+            // must still agree with the reference's, bit for bit.
+            let span = 0.5 * (grid - 1) as f32;
+            for e in 0..x.len() {
+                let (i, t) = segment(cache.x_clamped[e], span, grid);
+                assert_eq!(i, want_idx[e] as usize, "n={n}: segment index at {e}");
+                assert_eq!(t.to_bits(), want_t[e].to_bits(), "n={n}: coordinate at {e}");
+            }
+            assert_eq!(
+                cache.retained_floats(),
+                n * channels,
+                "n={n}: one f32 per element"
+            );
         }
     }
 
