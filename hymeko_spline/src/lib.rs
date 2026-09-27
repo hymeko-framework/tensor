@@ -43,8 +43,10 @@ pub mod catmull_rom;
 pub mod kochanek_bartels;
 
 pub use catmull_rom::{
-    catmull_rom_backward, catmull_rom_forward, chebyshev_control_points, chebyshev_cr_backward,
-    chebyshev_cr_forward, chebyshev_deploy_backward, chebyshev_deploy_forward,
-    chebyshev_knot_basis, CatmullRomBackward, CatmullRomCache, ChebyshevCrBackward, PAR_MIN_ELEMS,
+    catmull_rom_backward, catmull_rom_backward_into, catmull_rom_forward, catmull_rom_forward_into,
+    chebyshev_control_points, chebyshev_cr_backward, chebyshev_cr_backward_into,
+    chebyshev_cr_forward, chebyshev_cr_forward_into, chebyshev_deploy_backward,
+    chebyshev_deploy_forward, chebyshev_knot_basis, CatmullRomBackward, CatmullRomBuffers,
+    CatmullRomCache, ChebyshevCrBackward, PAR_MIN_ELEMS,
 };
 pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};

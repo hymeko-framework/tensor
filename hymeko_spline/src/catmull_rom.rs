@@ -107,11 +107,16 @@ fn block_stride(n: usize, channels: usize) -> usize {
 
 /// Cache from Catmull--Rom forward needed by the closed-form backward.
 ///
+/// A caller that runs the forward repeatedly may keep one cache and pass it to
+/// [`catmull_rom_forward_into`], which refills it in place: its buffers keep their capacity, so a
+/// training step stops allocating (and page-faulting) a fresh tape every call. `Default` is the
+/// empty cache such a caller starts from.
+///
 /// It holds **only what the backward cannot recompute**: five bytes per element. The segment
 /// index and the local coordinate are functions of the clamped input ([`segment`]), so the backward
 /// recomputes them with the forward's own expression instead of reading them from a tape; the
 /// result is bit-identical. Until 2026-09-25 both were stored as well, ten bytes per element.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CatmullRomCache {
     /// Clamped input values, flat `(n, channels)`. The segment of each element is
     /// [`segment`] of this value.
@@ -231,6 +236,8 @@ fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w:
 /// # Postconditions
 /// Returns output flat `(n, channels)` and a cache for backward. Inputs are
 /// clamped to `[-1, 1]`, matching the canonical Python evaluator.
+///
+/// Allocates both; [`catmull_rom_forward_into`] is the same forward into buffers the caller keeps.
 pub fn catmull_rom_forward(
     coef: &[f32],
     x: &[f32],
@@ -238,6 +245,43 @@ pub fn catmull_rom_forward(
     channels: usize,
     grid: usize,
 ) -> (Vec<f32>, CatmullRomCache) {
+    let mut out = vec![0.0; x.len()];
+    let mut cache = CatmullRomCache::default();
+    let into = CatmullRomBuffers {
+        out: &mut out,
+        cache: &mut cache,
+    };
+    catmull_rom_forward_into(coef, x, n, channels, grid, into);
+    (out, cache)
+}
+
+/// The two buffers a Catmull--Rom forward writes, owned by the caller: the output, flat
+/// `(n, channels)`, and the tape the backward reads.
+#[derive(Debug)]
+pub struct CatmullRomBuffers<'a> {
+    /// Output, flat `(n, channels)`; every element is written.
+    pub out: &'a mut [f32],
+    /// Refilled in place for the call's shape; its buffers keep their capacity.
+    pub cache: &'a mut CatmullRomCache,
+}
+
+/// [`catmull_rom_forward`] into caller-owned buffers. Nothing either buffer held before is read.
+///
+/// # Preconditions
+/// As [`catmull_rom_forward`], and `into.out.len() == n * channels`.
+///
+/// # Postconditions
+/// `into.out` and `into.cache` hold exactly what [`catmull_rom_forward`] returns for the same
+/// arguments, bit for bit.
+pub fn catmull_rom_forward_into(
+    coef: &[f32],
+    x: &[f32],
+    n: usize,
+    channels: usize,
+    grid: usize,
+    into: CatmullRomBuffers<'_>,
+) {
+    let CatmullRomBuffers { out, cache } = into;
     // Three is the smallest grid this operator **supports**: `i` ranges over `{0, 1}`, giving two
     // segments, and the outer stencil points are supplied by the endpoint replication
     // `cr_control_indices` already performs. The CogInfoCom HSiKAN configuration uses grid 3, which
@@ -249,10 +293,16 @@ pub fn catmull_rom_forward(
     );
     assert_eq!(x.len(), n * channels);
     assert_eq!(coef.len(), channels * grid);
+    assert_eq!(out.len(), x.len(), "out must be (n, channels)");
 
-    let mut out = vec![0.0; x.len()];
-    let mut x_clamped = vec![0.0; x.len()];
-    let mut interior = vec![false; x.len()];
+    // Refilled, not rebuilt: `resize` keeps the capacity, and the blocks below overwrite every
+    // element, so nothing a previous call left is read.
+    cache.x_clamped.resize(x.len(), 0.0);
+    cache.interior.resize(x.len(), false);
+    cache.n = n;
+    cache.channels = channels;
+    cache.grid = grid;
+    let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
     // parallel result is bit-identical to the sequential one at any thread count.
@@ -284,9 +334,9 @@ pub fn catmull_rom_forward(
             channels,
             x,
             ForwardRow {
-                out: &mut out,
-                x_clamped: &mut x_clamped,
-                interior: &mut interior,
+                out,
+                x_clamped,
+                interior,
             },
         );
     }
@@ -298,22 +348,11 @@ pub fn catmull_rom_forward(
         channels,
         x,
         ForwardRow {
-            out: &mut out,
-            x_clamped: &mut x_clamped,
-            interior: &mut interior,
-        },
-    );
-
-    (
-        out,
-        CatmullRomCache {
+            out,
             x_clamped,
             interior,
-            n,
-            channels,
-            grid,
         },
-    )
+    );
 }
 
 /// One block's slices as the five-way zip yields them.
@@ -404,15 +443,37 @@ fn backward_chunk(
 /// 2026-08-29; it is gone, and the retired behaviour is frozen — and still executable — in
 /// `hymeko_numeric_vv/tests/support/frozen_clamp_oracle.rs`. `grad_coef` was never affected: it
 /// accumulates outside the guard.
+///
+/// Allocates `grad_x`; [`catmull_rom_backward_into`] writes it into a buffer the caller keeps.
 pub fn catmull_rom_backward(
     coef: &[f32],
     cache: &CatmullRomCache,
     grad_y: &[f32],
 ) -> CatmullRomBackward {
+    let mut grad_x = vec![0.0; grad_y.len()];
+    let grad_coef = catmull_rom_backward_into(coef, cache, grad_y, &mut grad_x);
+    CatmullRomBackward { grad_x, grad_coef }
+}
+
+/// [`catmull_rom_backward`] with the input gradient written into `grad_x`, every element of it;
+/// returns the control-point gradient. Each block of `grad_x` is zeroed by the task that fills it,
+/// so the elements outside the clamp interval read `0` whatever the buffer held before.
+///
+/// # Preconditions
+/// As [`catmull_rom_backward`], and `grad_x.len() == grad_y.len()`.
+///
+/// # Postconditions
+/// `grad_x` and the returned gradient are exactly [`catmull_rom_backward`]'s, bit for bit.
+pub fn catmull_rom_backward_into(
+    coef: &[f32],
+    cache: &CatmullRomCache,
+    grad_y: &[f32],
+    grad_x: &mut [f32],
+) -> Vec<f32> {
     assert_eq!(grad_y.len(), cache.n * cache.channels);
     assert_eq!(coef.len(), cache.channels * cache.grid);
+    assert_eq!(grad_x.len(), grad_y.len(), "grad_x must be (n, channels)");
 
-    let mut grad_x = vec![0.0; grad_y.len()];
     let mut grad_coef = vec![0.0; coef.len()];
 
     // Rows split into a FIXED number of blocks. Each block writes its own disjoint
@@ -435,6 +496,8 @@ pub fn catmull_rom_backward(
     let mut partials = vec![0.0f32; blocks * coef.len()];
 
     let kernel = |((((gx, gy), x_clamped), interior), local): BackwardZip<'_>| {
+        // The chunk writes only interior elements; the rest are the clamp's zero.
+        gx.fill(0.0);
         backward_chunk(
             coef,
             cache.channels,
@@ -485,7 +548,7 @@ pub fn catmull_rom_backward(
         }
     }
 
-    CatmullRomBackward { grad_x, grad_coef }
+    grad_coef
 }
 
 /// Chebyshev basis evaluated at uniform CR knots in `[-1, 1]`.
@@ -538,10 +601,31 @@ pub fn chebyshev_cr_forward(
     grid: usize,
     k: usize,
 ) -> (Vec<f32>, CatmullRomCache, Vec<f32>, Vec<f32>) {
+    let mut y = vec![0.0; x.len()];
+    let mut cache = CatmullRomCache::default();
+    let into = CatmullRomBuffers {
+        out: &mut y,
+        cache: &mut cache,
+    };
+    let (control, basis) = chebyshev_cr_forward_into(coef, x, n, channels, grid, k, into);
+    (y, cache, control, basis)
+}
+
+/// [`chebyshev_cr_forward`] into caller-owned buffers (see [`catmull_rom_forward_into`]); returns
+/// the derived control points and the knot basis, `channels · grid` and `grid · k` long.
+pub fn chebyshev_cr_forward_into(
+    coef: &[f32],
+    x: &[f32],
+    n: usize,
+    channels: usize,
+    grid: usize,
+    k: usize,
+    into: CatmullRomBuffers<'_>,
+) -> (Vec<f32>, Vec<f32>) {
     let basis = chebyshev_knot_basis(grid, k);
     let control = chebyshev_control_points(coef, &basis, channels, grid, k);
-    let (y, cache) = catmull_rom_forward(&control, x, n, channels, grid);
-    (y, cache, control, basis)
+    catmull_rom_forward_into(&control, x, n, channels, grid, into);
+    (control, basis)
 }
 
 /// Backward Chebyshev-CR train path.
@@ -554,21 +638,34 @@ pub fn chebyshev_cr_backward(
     grad_y: &[f32],
     k: usize,
 ) -> ChebyshevCrBackward {
-    let cr = catmull_rom_backward(control_points, cache, grad_y);
+    let mut grad_x = vec![0.0; grad_y.len()];
+    let grad_coef =
+        chebyshev_cr_backward_into(control_points, basis, cache, grad_y, k, &mut grad_x);
+    ChebyshevCrBackward { grad_x, grad_coef }
+}
+
+/// [`chebyshev_cr_backward`] with the input gradient written into `grad_x` (see
+/// [`catmull_rom_backward_into`]); returns the Chebyshev-coefficient gradient.
+pub fn chebyshev_cr_backward_into(
+    control_points: &[f32],
+    basis: &[f32],
+    cache: &CatmullRomCache,
+    grad_y: &[f32],
+    k: usize,
+    grad_x: &mut [f32],
+) -> Vec<f32> {
+    let cr_grad_coef = catmull_rom_backward_into(control_points, cache, grad_y, grad_x);
     let mut grad_coef = vec![0.0; cache.channels * k];
     for ch in 0..cache.channels {
         for term in 0..k {
             let mut acc = 0.0;
             for g in 0..cache.grid {
-                acc += cr.grad_coef[ch * cache.grid + g] * basis[g * k + term];
+                acc += cr_grad_coef[ch * cache.grid + g] * basis[g * k + term];
             }
             grad_coef[ch * k + term] = acc;
         }
     }
-    ChebyshevCrBackward {
-        grad_x: cr.grad_x,
-        grad_coef,
-    }
+    grad_coef
 }
 
 /// Direct Chebyshev deploy forward, avoiding CR gather.
