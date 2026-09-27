@@ -58,8 +58,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod port_hamiltonian;
 pub mod diffusion;
+pub mod port_hamiltonian;
 
 pub use port_hamiltonian::{Interconnection, NormalisedFlow, Port, PortHamiltonian};
 
@@ -352,7 +352,11 @@ pub fn cg_normal<O: Operator>(
         }
         let denominator = dot(&p, &ap);
         if denominator.abs() < 1e-300 {
-            return Report { iterations: iteration, residual: relative, converged: false };
+            return Report {
+                iterations: iteration,
+                residual: relative,
+                converged: false,
+            };
         }
         let alpha = rr / denominator;
         for i in 0..n {

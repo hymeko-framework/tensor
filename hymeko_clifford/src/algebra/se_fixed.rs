@@ -28,7 +28,6 @@
 //! the last bit — and a caller that had recorded a pose would see it move. `tests/se_fixed.rs`
 //! checks the equality rather than assuming it.
 
-
 use super::multivector::Multivector;
 use super::se::Se;
 #[cfg(test)]
@@ -243,12 +242,7 @@ impl<D: EuclideanDim> SeFixed<D> {
     /// # Preconditions
     /// Every coefficient of `a` outside `a_blades`, and of `b` outside `b_blades`, must be zero.
     /// Nothing checks it; the sets come from [`EuclideanDim`] and the callers are the group law.
-    fn geo_over(
-        a: &D::Blades,
-        a_blades: &[usize],
-        b: &D::Blades,
-        b_blades: &[usize],
-    ) -> D::Blades {
+    fn geo_over(a: &D::Blades, a_blades: &[usize], b: &D::Blades, b_blades: &[usize]) -> D::Blades {
         let (a, b) = (a.as_ref(), b.as_ref());
         let mut out = D::zero_blades();
         let o = out.as_mut();
@@ -329,7 +323,11 @@ impl<D: EuclideanDim> SeFixed<D> {
         let moved = self.rotate(rhs.translation.as_ref());
         let mut translation = D::zero_coords();
         {
-            let (out, m, t) = (translation.as_mut(), moved.as_ref(), self.translation.as_ref());
+            let (out, m, t) = (
+                translation.as_mut(),
+                moved.as_ref(),
+                self.translation.as_ref(),
+            );
             for i in 0..D::N {
                 out[i] = m[i] + t[i];
             }
@@ -458,12 +456,7 @@ impl Se3 {
     /// The rotor as a unit quaternion `[w, x, y, z]`.
     pub fn quaternion(&self) -> [f64; 4] {
         // e2e3 -> x, e1e3 -> y (with the sign the rotor convention above puts there), e1e2 -> z
-        [
-            self.rotor[0],
-            -self.rotor[6],
-            self.rotor[5],
-            -self.rotor[3],
-        ]
+        [self.rotor[0], -self.rotor[6], self.rotor[5], -self.rotor[3]]
     }
 }
 
@@ -488,11 +481,19 @@ mod grade_tests {
         let mut state = 0x6EED_u64;
         for case in 0..500 {
             let x = Se3::rpy_xyz(
-                [rng(&mut state) * 3.2, rng(&mut state) * 3.2, rng(&mut state) * 3.2],
+                [
+                    rng(&mut state) * 3.2,
+                    rng(&mut state) * 3.2,
+                    rng(&mut state) * 3.2,
+                ],
                 [rng(&mut state), rng(&mut state), rng(&mut state)],
             );
             let y = Se3::rpy_xyz(
-                [rng(&mut state) * 3.2, rng(&mut state) * 3.2, rng(&mut state) * 3.2],
+                [
+                    rng(&mut state) * 3.2,
+                    rng(&mut state) * 3.2,
+                    rng(&mut state) * 3.2,
+                ],
                 [rng(&mut state), rng(&mut state), rng(&mut state)],
             );
 
@@ -530,12 +531,19 @@ mod grade_tests {
         let mut state = 0x9AB_u64;
         for case in 0..500 {
             let x = Se3::rpy_xyz(
-                [rng(&mut state) * 3.2, rng(&mut state) * 3.2, rng(&mut state) * 3.2],
+                [
+                    rng(&mut state) * 3.2,
+                    rng(&mut state) * 3.2,
+                    rng(&mut state) * 3.2,
+                ],
                 [rng(&mut state), rng(&mut state), rng(&mut state)],
             );
             for (i, &c) in x.rotor.iter().enumerate() {
                 if !Dim3::EVEN.contains(&i) {
-                    assert_eq!(c, 0.0, "case {case}: rotor has an odd component at blade {i}");
+                    assert_eq!(
+                        c, 0.0,
+                        "case {case}: rotor has an odd component at blade {i}"
+                    );
                 }
             }
             let axis = [rng(&mut state), rng(&mut state), rng(&mut state)];

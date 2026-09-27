@@ -607,8 +607,7 @@ fn the_degenerate_cases_are_the_ones_they_should_be() {
             );
         }
         assert_eq!(
-            spun.translation,
-            [0.0; 3],
+            spun.translation, [0.0; 3],
             "case {case}: a rotation about the origin moves the origin nowhere"
         );
     }

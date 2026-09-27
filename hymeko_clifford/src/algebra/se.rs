@@ -75,7 +75,10 @@ impl Se {
     /// # Panics
     /// If `i` or `j` is out of range, or `i == j` (which names no plane).
     pub fn plane_rotation(n: usize, i: usize, j: usize, angle: f64) -> Self {
-        assert!(i >= 1 && i <= n && j >= 1 && j <= n, "basis index out of range");
+        assert!(
+            i >= 1 && i <= n && j >= 1 && j <= n,
+            "basis index out of range"
+        );
         assert_ne!(i, j, "a rotation plane needs two distinct basis vectors");
         let sig = Self::signature(n);
         let bivector = Multivector::basis_vector(i, n).geo(&Multivector::basis_vector(j, n), &sig);
@@ -134,7 +137,10 @@ impl Se {
     /// # Panics
     /// If the two motions have different dimensions.
     pub fn compose(&self, rhs: &Se) -> Se {
-        assert_eq!(self.n, rhs.n, "cannot compose SE(n) elements of different n");
+        assert_eq!(
+            self.n, rhs.n,
+            "cannot compose SE(n) elements of different n"
+        );
         let sig = Self::signature(self.n);
         let moved = self.rotate(&rhs.translation);
         Se {
@@ -289,7 +295,10 @@ mod tests {
             if n >= 3 {
                 let mut e3 = vec![0.0; n];
                 e3[2] = 1.0;
-                assert!(close(&r.apply(&e3), &e3), "n = {n}: plane rotation must fix e3");
+                assert!(
+                    close(&r.apply(&e3), &e3),
+                    "n = {n}: plane rotation must fix e3"
+                );
             }
         }
     }
@@ -301,8 +310,14 @@ mod tests {
         let a = Se::plane_rotation(4, 1, 2, TAU / 4.0);
         let b = Se::plane_rotation(4, 3, 4, TAU / 4.0);
         let m = a.compose(&b);
-        assert!(close(&m.apply(&[1.0, 0.0, 0.0, 0.0]), &[0.0, 1.0, 0.0, 0.0]));
-        assert!(close(&m.apply(&[0.0, 0.0, 1.0, 0.0]), &[0.0, 0.0, 0.0, 1.0]));
+        assert!(close(
+            &m.apply(&[1.0, 0.0, 0.0, 0.0]),
+            &[0.0, 1.0, 0.0, 0.0]
+        ));
+        assert!(close(
+            &m.apply(&[0.0, 0.0, 1.0, 0.0]),
+            &[0.0, 0.0, 0.0, 1.0]
+        ));
     }
 
     #[test]
@@ -361,7 +376,10 @@ mod tests {
         let both = Se::se3_rpy_xyz([TAU / 4.0, 0.0, TAU / 4.0], [0.0; 3]);
         let zx = Se::se3_axis_angle([0.0, 0.0, 1.0], TAU / 4.0)
             .compose(&Se::se3_axis_angle([1.0, 0.0, 0.0], TAU / 4.0));
-        assert!(close(&both.apply(&[0.0, 1.0, 0.0]), &zx.apply(&[0.0, 1.0, 0.0])));
+        assert!(close(
+            &both.apply(&[0.0, 1.0, 0.0]),
+            &zx.apply(&[0.0, 1.0, 0.0])
+        ));
     }
 
     #[test]

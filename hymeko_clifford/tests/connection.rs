@@ -10,8 +10,8 @@
 //! that leaks into a core crate is how a core crate stops being one.
 
 use hymeko_clifford::{
-    closed_form_curvature, cotree_residuals, curvature_energy, quat_conjugate, quat_mul,
-    rotor_angle, rotor_holonomy_forward, tree_gauge_frames, TreeStep,
+    TreeStep, closed_form_curvature, cotree_residuals, curvature_energy, quat_conjugate, quat_mul,
+    rotor_angle, rotor_holonomy_forward, tree_gauge_frames,
 };
 
 /// xorshift64, so every number below is reproducible without a dependency.
@@ -66,7 +66,13 @@ fn wheel(rim: usize) -> Wheel {
             [(p, true), (rim + p, true), (back, false)]
         })
         .collect();
-    Wheel { nodes: rim + 1, edges, steps, cotree, cycles }
+    Wheel {
+        nodes: rim + 1,
+        edges,
+        steps,
+        cotree,
+        cycles,
+    }
 }
 
 /// The oracle: the mean plaquette holonomy angle, read from the true cycles through the crate's
@@ -88,7 +94,14 @@ fn oracle_curvature(w: &Wheel, edge_q: &[f32]) -> f32 {
     }
     let (holo, _) = rotor_holonomy_forward(&ordered, w.cycles.len(), k);
     let total: f32 = (0..w.cycles.len())
-        .map(|c| rotor_angle([holo[c * 4], holo[c * 4 + 1], holo[c * 4 + 2], holo[c * 4 + 3]]))
+        .map(|c| {
+            rotor_angle([
+                holo[c * 4],
+                holo[c * 4 + 1],
+                holo[c * 4 + 2],
+                holo[c * 4 + 3],
+            ])
+        })
         .sum();
     total / w.cycles.len() as f32
 }
@@ -113,7 +126,12 @@ fn the_root_frame_is_the_identity_and_every_frame_is_a_unit_rotor() {
     assert_eq!(frames.len(), w.nodes * 4);
     assert!(rotor_angle([frames[0], frames[1], frames[2], frames[3]]) < 1e-6);
     for i in 0..w.nodes {
-        let f = [frames[i * 4], frames[i * 4 + 1], frames[i * 4 + 2], frames[i * 4 + 3]];
+        let f = [
+            frames[i * 4],
+            frames[i * 4 + 1],
+            frames[i * 4 + 2],
+            frames[i * 4 + 3],
+        ];
         let n = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2] + f[3] * f[3]).sqrt();
         assert!((n - 1.0).abs() < 1e-4, "frame {i} has norm {n}");
     }
@@ -140,7 +158,10 @@ fn a_pure_gauge_has_no_curvature_however_large_its_rotors() {
     let mut q = vec![0.0f32; w.edges.len() * 4];
     let mut largest = 0.0f32;
     for (e, &(a, b)) in w.edges.iter().enumerate() {
-        let g = quat_mul(node_frames[b as usize], quat_conjugate(node_frames[a as usize]));
+        let g = quat_mul(
+            node_frames[b as usize],
+            quat_conjugate(node_frames[a as usize]),
+        );
         largest = largest.max(rotor_angle(g));
         q[e * 4..e * 4 + 4].copy_from_slice(&g);
     }
@@ -174,12 +195,18 @@ fn a_gauge_transformation_leaves_the_curvature_alone() {
     let mut transformed = vec![0.0f32; q.len()];
     for (e, &(a, b)) in w.edges.iter().enumerate() {
         let g = [q[e * 4], q[e * 4 + 1], q[e * 4 + 2], q[e * 4 + 3]];
-        let t = quat_mul(gauge[b as usize], quat_mul(g, quat_conjugate(gauge[a as usize])));
+        let t = quat_mul(
+            gauge[b as usize],
+            quat_mul(g, quat_conjugate(gauge[a as usize])),
+        );
         transformed[e * 4..e * 4 + 4].copy_from_slice(&t);
     }
     let after = closed_form_curvature(w.nodes, &w.edges, &w.steps, &w.cotree, &transformed);
 
-    assert!(before > 0.05, "the fixture must be curved to begin with: {before}");
+    assert!(
+        before > 0.05,
+        "the fixture must be curved to begin with: {before}"
+    );
     assert!(
         (before - after).abs() < 1e-4,
         "curvature is gauge invariant: {before} became {after}"
@@ -205,7 +232,12 @@ fn the_closed_form_reproduces_the_plaquette_holonomy_cycle_by_cycle() {
         let mut ordered = vec![0.0f32; w.cycles.len() * k * 4];
         for (c, cycle) in w.cycles.iter().enumerate() {
             for (i, &(edge, forward)) in cycle.iter().enumerate() {
-                let g = [q[edge * 4], q[edge * 4 + 1], q[edge * 4 + 2], q[edge * 4 + 3]];
+                let g = [
+                    q[edge * 4],
+                    q[edge * 4 + 1],
+                    q[edge * 4 + 2],
+                    q[edge * 4 + 3],
+                ];
                 let g = if forward { g } else { quat_conjugate(g) };
                 ordered[(c * k + i) * 4..(c * k + i) * 4 + 4].copy_from_slice(&g);
             }
@@ -219,7 +251,12 @@ fn the_closed_form_reproduces_the_plaquette_holonomy_cycle_by_cycle() {
                 residuals[c * 4 + 2],
                 residuals[c * 4 + 3],
             ]);
-            let b = rotor_angle([holo[c * 4], holo[c * 4 + 1], holo[c * 4 + 2], holo[c * 4 + 3]]);
+            let b = rotor_angle([
+                holo[c * 4],
+                holo[c * 4 + 1],
+                holo[c * 4 + 2],
+                holo[c * 4 + 3],
+            ]);
             assert!(
                 (a - b).abs() < 1e-4,
                 "theta {theta}, cycle {c}: estimate {a} against oracle {b}"
@@ -272,6 +309,9 @@ fn the_cotree_carries_one_residual_per_independent_cycle() {
         assert_eq!(w.cotree.len(), w.edges.len() - w.nodes + 1);
         let q = sample(&w, &mut Rng(rim as u64 + 1), 0.8);
         let frames = tree_gauge_frames(w.nodes, &w.edges, &w.steps, &q);
-        assert_eq!(cotree_residuals(&w.edges, &w.cotree, &q, &frames).len(), w.cotree.len() * 4);
+        assert_eq!(
+            cotree_residuals(&w.edges, &w.cotree, &q, &frames).len(),
+            w.cotree.len() * 4
+        );
     }
 }

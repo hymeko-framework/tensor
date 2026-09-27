@@ -111,10 +111,8 @@ fn canonical_mechanics_is_a_perfect_matching() {
     // its own momentum, weight one, and nothing else coupled to anything. Stating it this way is
     // what puts mechanics and circuits under one integrator.
     for n in [1usize, 2, 5] {
-        let matching = Interconnection::new(
-            2 * n,
-            (0..n).map(|k| Port::edge(k, n + k, 1.0)).collect(),
-        );
+        let matching =
+            Interconnection::new(2 * n, (0..n).map(|k| Port::edge(k, n + k, 1.0)).collect());
         let j = matching.dense();
         let d = 2 * n;
         for r in 0..d {
@@ -253,9 +251,7 @@ fn the_power_balance_holds_at_every_step_with_dissipation_and_a_source() {
         let dim = 3 + rng.below(8);
         let ph = system(&mut rng, dim, false);
         let mut x: Vec<f64> = (0..dim).map(|_| rng.signed() * 2.0).collect();
-        let input: Vec<f64> = (0..dim)
-            .map(|k| if k == 0 { 1.5 } else { 0.0 })
-            .collect();
+        let input: Vec<f64> = (0..dim).map(|k| if k == 0 { 1.5 } else { 0.0 }).collect();
 
         let h = 1e-3;
         let mut scale = ph.hamiltonian(&x).max(1.0);
