@@ -41,6 +41,8 @@
 pub mod catmull_rom;
 /// Kochanek-Bartels (TCB) spline kernels.
 pub mod kochanek_bartels;
+/// Rational B-spline curves and parameter derivatives in f64 homogeneous coordinates.
+pub mod nurbs;
 
 pub use catmull_rom::{
     catmull_rom_backward, catmull_rom_backward_into, catmull_rom_forward, catmull_rom_forward_into,
