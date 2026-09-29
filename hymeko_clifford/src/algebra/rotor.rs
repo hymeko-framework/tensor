@@ -121,8 +121,22 @@ pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 const IDENT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
 /// Read quaternion `i` out of a flat 4-strided buffer.
+///
+/// The bridge between the flat `(n · 4)` layout callers store rotors in and the `[f32; 4]` value
+/// type the rest of this module takes: [`quat_mul`], [`quat_conjugate`], [`quat_rotate`] and
+/// [`cayley_to_unit_quat`] are all by value, and without this the caller writes the indexing out
+/// by hand. It is `pub` because they did — a 2026-09-21 census found this exact body, normalised
+/// hash `23365f526a65`, in eight places: five in Nagare, two more in this crate, one in its tests.
+///
+/// # Preconditions
+/// `buf.len() >= (i + 1) * 4`. Panics on the slice index otherwise, which is the intended
+/// behaviour: a short buffer is a layout error at the call site, not a value to be recovered from.
+///
+/// # Postconditions
+/// Returns `[buf[4i], buf[4i+1], buf[4i+2], buf[4i+3]]` — no normalisation, no reordering. The
+/// component order is the caller's, and this function does not impose the `(w, x, y, z)` reading.
 #[inline]
-fn q_at(buf: &[f32], i: usize) -> [f32; 4] {
+pub fn q_at(buf: &[f32], i: usize) -> [f32; 4] {
     [buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]]
 }
 

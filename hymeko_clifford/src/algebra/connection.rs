@@ -45,16 +45,13 @@
 //! metric stay on the application side, and `tests/connection.rs` rebuilds a wheel of its own to
 //! check the identity this module is supposed to satisfy.
 
-use super::rotor::{quat_conjugate, quat_mul};
+// `q_at` is taken from `rotor`, not written out again: this module held a second, byte-identical
+// copy until 2026-09-21. It is the same 4-strided read, and two copies of it in one crate is how
+// the eight-way spread outside this crate started.
+use super::rotor::{q_at, quat_conjugate, quat_mul};
 
 /// The identity rotor.
 const IDENT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
-
-/// Read quaternion `i` out of a flat 4-strided buffer.
-#[inline]
-fn q_at(buf: &[f32], i: usize) -> [f32; 4] {
-    [buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]]
-}
 
 /// The rotation angle of a unit rotor, in radians, on `[0, π]`.
 ///
