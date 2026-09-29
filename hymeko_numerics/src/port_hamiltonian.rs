@@ -191,7 +191,11 @@ impl PortHamiltonian {
     /// strictly positive.
     pub fn new(interconnection: Interconnection, dissipation: Vec<f64>, energy: Vec<f64>) -> Self {
         let n = interconnection.dim();
-        assert_eq!(dissipation.len(), n, "dissipation must cover every coordinate");
+        assert_eq!(
+            dissipation.len(),
+            n,
+            "dissipation must cover every coordinate"
+        );
         assert_eq!(energy.len(), n, "energy must cover every coordinate");
         assert!(
             dissipation.iter().all(|&r| r >= 0.0),
@@ -277,7 +281,15 @@ impl PortHamiltonian {
         }
 
         let mut next = z.clone();
-        let report = gmres(&flow, 0.5 * h, &b, &mut next, tolerance, n.clamp(1, 30), 200);
+        let report = gmres(
+            &flow,
+            0.5 * h,
+            &b,
+            &mut next,
+            tolerance,
+            n.clamp(1, 30),
+            200,
+        );
         self.denormalise(&next, x);
         report
     }

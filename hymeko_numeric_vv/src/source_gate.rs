@@ -167,7 +167,8 @@ mod tests {
     #[test]
     fn a_token_that_is_present_is_reported_with_its_line() {
         let s = ProductionScan::new([spline_src()]);
-        let hits = s.hits("pub fn catmull_rom_forward");
+        // With the parenthesis: `catmull_rom_forward_into` shares the name's prefix.
+        let hits = s.hits("pub fn catmull_rom_forward(");
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(hits[0].line_no > 1);
     }

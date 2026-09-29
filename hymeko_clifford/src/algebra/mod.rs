@@ -16,13 +16,13 @@ mod multivector;
 mod rotor;
 mod se;
 mod se_fixed;
-mod spatial;
 mod signature;
+mod spatial;
 
 pub use blade::{blade_product, canonical_reorder_sign};
 pub use connection::{
-    closed_form_curvature, cotree_residuals, curvature_energy, rotor_angle, tree_gauge_frames,
-    TreeStep,
+    TreeStep, closed_form_curvature, cotree_residuals, curvature_energy, rotor_angle,
+    tree_gauge_frames,
 };
 pub use multivector::Multivector;
 pub use rotor::{
@@ -31,5 +31,5 @@ pub use rotor::{
 };
 pub use se::Se;
 pub use se_fixed::{Dim2, Dim3, EuclideanDim, Se2, Se3, SeFixed};
-pub use spatial::{ArticulatedInertia, SpatialInertia, Twist, Wrench};
 pub use signature::Signature;
+pub use spatial::{ArticulatedInertia, SpatialInertia, Twist, Wrench};

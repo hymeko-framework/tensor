@@ -109,13 +109,25 @@ fn rotate_apply_inverse_and_the_matrix_all_agree() {
         let g = m.to_se();
         let v = [rng.signed(), rng.signed(), rng.signed()];
 
-        assert_eq!(m.rotate(&v).as_slice(), g.rotate(&v).as_slice(), "rotate {case}");
-        assert_eq!(m.apply(&v).as_slice(), g.apply(&v).as_slice(), "apply {case}");
+        assert_eq!(
+            m.rotate(&v).as_slice(),
+            g.rotate(&v).as_slice(),
+            "rotate {case}"
+        );
+        assert_eq!(
+            m.apply(&v).as_slice(),
+            g.apply(&v).as_slice(),
+            "apply {case}"
+        );
         same(&m.inverse(), &g.inverse(), &format!("inverse {case}"));
 
         let mut mat = [0.0f64; 9];
         m.rotation_matrix_into(&mut mat);
-        assert_eq!(mat.as_slice(), g.rotation_matrix().as_slice(), "matrix {case}");
+        assert_eq!(
+            mat.as_slice(),
+            g.rotation_matrix().as_slice(),
+            "matrix {case}"
+        );
 
         // and the quaternion the SE(3) case exposes
         assert_eq!(m.quaternion(), g.se3_quaternion(), "quaternion {case}");

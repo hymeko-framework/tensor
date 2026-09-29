@@ -90,7 +90,11 @@ fn the_iteration_count_does_not_depend_on_the_size_of_the_system() {
     let mut counts = Vec::new();
 
     for cells in [64usize, 512, 4_096, 32_768] {
-        let s = MaxwellChain { cells, gamma: 1.0, sigma: 0.0 };
+        let s = MaxwellChain {
+            cells,
+            gamma: 1.0,
+            sigma: 0.0,
+        };
         let b = rhs(s.dim());
         let mut x = vec![0.0; s.dim()];
         let r = richardson(&s, theta, &b, &mut x, tol, 200);
@@ -116,7 +120,11 @@ fn the_iteration_count_is_the_one_the_geometry_predicts() {
     // mean the argument for choosing this iteration is wrong even where it happens to work.
     let tol = 1e-14;
     for rho in [0.02, 0.065, 0.2, 0.5] {
-        let s = MaxwellChain { cells: 1_024, gamma: 1.0, sigma: 0.0 };
+        let s = MaxwellChain {
+            cells: 1_024,
+            gamma: 1.0,
+            sigma: 0.0,
+        };
         let b = rhs(s.dim());
         let mut x = vec![0.0; s.dim()];
         let r = richardson(&s, rho / 2.0, &b, &mut x, tol, 400);
@@ -137,7 +145,11 @@ fn dissipation_only_helps() {
     // the origin. A physically lossier medium must not be numerically harder.
     let theta = 0.065 / 2.0;
     let count = |sigma: f64| {
-        let s = MaxwellChain { cells: 1_024, gamma: 1.0, sigma };
+        let s = MaxwellChain {
+            cells: 1_024,
+            gamma: 1.0,
+            sigma,
+        };
         let b = rhs(s.dim());
         let mut x = vec![0.0; s.dim()];
         richardson(&s, theta, &b, &mut x, 1e-14, 400).iterations
@@ -160,7 +172,11 @@ fn the_stiff_regime_is_solved_by_both_implicit_methods() {
     // solver to remain slower. Richardson must still reject this stiff regime.
     let rho = 6.0;
     let theta = rho / 2.0;
-    let s = MaxwellChain { cells: 2_048, gamma: 1.0, sigma: 0.0 };
+    let s = MaxwellChain {
+        cells: 2_048,
+        gamma: 1.0,
+        sigma: 0.0,
+    };
     let b = rhs(s.dim());
     let tol = 1e-12;
 
@@ -176,7 +192,10 @@ fn the_stiff_regime_is_solved_by_both_implicit_methods() {
 
     let mut x = vec![0.0; s.dim()];
     let normal = cg_normal(&s, theta, &b, &mut x, tol, 400);
-    assert!(normal.converged, "CG on the normal equations must carry the stiff step: {normal:?}");
+    assert!(
+        normal.converged,
+        "CG on the normal equations must carry the stiff step: {normal:?}"
+    );
     assert!(
         relative_residual(&s, theta, &b, &x) <= tol * 10.0,
         "and the reported residual must be the real one"
@@ -198,7 +217,11 @@ fn the_stiff_solver_also_scales_with_the_structure_rather_than_the_size() {
     let theta = 6.0 / 2.0;
     let mut counts = Vec::new();
     for cells in [256usize, 1_024, 4_096] {
-        let s = MaxwellChain { cells, gamma: 1.0, sigma: 0.0 };
+        let s = MaxwellChain {
+            cells,
+            gamma: 1.0,
+            sigma: 0.0,
+        };
         let b = rhs(s.dim());
         let mut x = vec![0.0; s.dim()];
         let r = cg_normal(&s, theta, &b, &mut x, 1e-10, 600);
@@ -218,7 +241,11 @@ fn the_stiff_cost_grows_with_the_stiffness_and_not_faster() {
     // cond(A^T A) = 1 + rho^2, so CG's rate is set by sqrt(cond) ~ rho: the iteration count should
     // grow roughly LINEARLY in the stiffness ratio. If it grew quadratically, forming the normal
     // equations would be the mistake it usually is, and the recommendation would be wrong.
-    let s = MaxwellChain { cells: 512, gamma: 1.0, sigma: 0.0 };
+    let s = MaxwellChain {
+        cells: 512,
+        gamma: 1.0,
+        sigma: 0.0,
+    };
     let b = rhs(s.dim());
     let count = |rho: f64| {
         let mut x = vec![0.0; s.dim()];
@@ -243,7 +270,11 @@ fn both_solvers_agree_with_a_direct_factorisation() {
     // A densely and eliminate.
     let cells = 40;
     let theta = 0.4;
-    let s = MaxwellChain { cells, gamma: 1.0, sigma: 0.3 };
+    let s = MaxwellChain {
+        cells,
+        gamma: 1.0,
+        sigma: 0.3,
+    };
     let n = s.dim();
     let b = rhs(n);
 
