@@ -163,6 +163,44 @@ fn segment(xc: f32, span: f32, grid: usize) -> (usize, f32) {
     (i, u - i as f32)
 }
 
+/// Each segment of each channel with what an element in it reads (Nagare plan
+/// 2026-10-08-orthtree-hypergraph-convolution, Amendment 1): the four control values, gathered once
+/// per call instead of once per element, and the four control indices the coefficient gradient
+/// accumulates into.
+///
+/// # Invariants
+/// `quads[ch · (grid − 1) + i][k] == coef[ch · grid + controls[i][k]]` and
+/// `controls[i] == cr_control_indices(i, grid)` for every channel `ch` and segment `i ≤ grid − 2`:
+/// the values and indices the per-element expressions read, so every result is unchanged bit for
+/// bit.
+struct Segments {
+    quads: Vec<[f32; 4]>,
+    controls: Vec<[usize; 4]>,
+}
+
+impl Segments {
+    /// The table of `coef`, `channels × grid`.
+    ///
+    /// # Preconditions
+    /// `grid >= 3` and `coef.len() == channels · grid`.
+    fn of(coef: &[f32], channels: usize, grid: usize) -> Self {
+        let controls: Vec<[usize; 4]> =
+            (0..grid - 1).map(|i| cr_control_indices(i, grid)).collect();
+        let quads = coef
+            .chunks_exact(grid)
+            .take(channels)
+            .flat_map(|channel| controls.iter().map(move |c| c.map(|j| channel[j])))
+            .collect();
+        Self { quads, controls }
+    }
+
+    /// Channel `ch`'s quadruples, one per segment.
+    fn channel(&self, ch: usize) -> &[[f32; 4]] {
+        let per = self.controls.len();
+        &self.quads[ch * per..(ch + 1) * per]
+    }
+}
+
 /// Result of a Catmull--Rom backward pass.
 #[derive(Debug, Clone)]
 pub struct CatmullRomBackward {
@@ -202,26 +240,37 @@ struct ForwardRow<'a> {
 /// Every slice in `w` has the same length as `x_block`, which is a whole multiple
 /// of `channels`; `coef.len() == channels * grid`; `grid >= 3`.
 #[inline(always)]
-fn forward_block(coef: &[f32], grid: usize, channels: usize, x_block: &[f32], w: ForwardRow<'_>) {
+fn forward_block(
+    segments: &Segments,
+    grid: usize,
+    channels: usize,
+    x_block: &[f32],
+    w: ForwardRow<'_>,
+) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
     let span = 0.5 * (grid - 1) as f32;
-    for row in 0..x_block.len() / channels {
-        let base_e = row * channels;
-        for ch in 0..channels {
-            let e = base_e + ch;
-            let raw = x_block[e];
+    let rows = w
+        .out
+        .chunks_exact_mut(channels)
+        .zip(w.x_clamped.chunks_exact_mut(channels))
+        .zip(w.interior.chunks_exact_mut(channels))
+        .zip(x_block.chunks_exact(channels));
+    for (((out, x_clamped), interior), x) in rows {
+        for (ch, (((o, xc_out), inside), &raw)) in out
+            .iter_mut()
+            .zip(x_clamped.iter_mut())
+            .zip(interior.iter_mut())
+            .zip(x)
+            .enumerate()
+        {
             let xc = raw.clamp(-1.0, 1.0);
             let (i, t) = segment(xc, span, grid);
             let weights = cr_weights(t);
-            let control = cr_control_indices(i, grid);
-            let base = ch * grid;
-            w.out[e] = weights[0] * coef[base + control[0]]
-                + weights[1] * coef[base + control[1]]
-                + weights[2] * coef[base + control[2]]
-                + weights[3] * coef[base + control[3]];
-            w.x_clamped[e] = xc;
+            let c = segments.channel(ch)[i];
+            *o = weights[0] * c[0] + weights[1] * c[1] + weights[2] * c[2] + weights[3] * c[3];
+            *xc_out = xc;
             // Closed interval: `±1` is interior, matching the guard this replaces.
-            w.interior[e] = (-1.0..=1.0).contains(&raw);
+            *inside = (-1.0..=1.0).contains(&raw);
         }
     }
 }
@@ -303,6 +352,7 @@ pub fn catmull_rom_forward_into(
     cache.channels = channels;
     cache.grid = grid;
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
+    let segments = Segments::of(coef, channels, grid);
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
     // parallel result is bit-identical to the sequential one at any thread count.
@@ -316,7 +366,7 @@ pub fn catmull_rom_forward_into(
             .zip(x.par_chunks(stride))
             .for_each(|(((out_b, xc_b), in_b), x_b)| {
                 forward_block(
-                    coef,
+                    &segments,
                     grid,
                     channels,
                     x_b,
@@ -329,7 +379,7 @@ pub fn catmull_rom_forward_into(
             });
     } else {
         forward_block(
-            coef,
+            &segments,
             grid,
             channels,
             x,
@@ -343,7 +393,7 @@ pub fn catmull_rom_forward_into(
 
     #[cfg(not(feature = "parallel"))]
     forward_block(
-        coef,
+        &segments,
         grid,
         channels,
         x,
@@ -391,7 +441,7 @@ struct BackwardChunk<'a> {
 /// *accumulated* into, so the caller owns its initial value.
 #[inline(always)]
 fn backward_chunk(
-    coef: &[f32],
+    segments: &Segments,
     channels: usize,
     grid: usize,
     c: BackwardChunk<'_>,
@@ -400,30 +450,39 @@ fn backward_chunk(
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
     // `du/dx` is the forward's `span`: one value, named for each of its two uses.
     let du_dx = 0.5 * (grid - 1) as f32;
-    // Rows outer, channels inner — the channel index must not become an integer
-    // division per element (that cost ~24 % when first written that way).
-    for row in 0..c.grad_x.len() / channels {
-        let base_e = row * channels;
-        for ch in 0..channels {
-            let e = base_e + ch;
-            let gy = c.grad_y[e];
-            let (i, t) = segment(c.x_clamped[e], du_dx, grid);
+    // Rows outer, channels inner, as the forward: each channel's coefficients and segment table
+    // sit beside its element, and every coefficient still accumulates in element order.
+    let rows = c
+        .grad_x
+        .chunks_exact_mut(channels)
+        .zip(c.grad_y.chunks_exact(channels))
+        .zip(c.x_clamped.chunks_exact(channels))
+        .zip(c.interior.chunks_exact(channels));
+    for (((grad_x, grad_y), x_clamped), interior) in rows {
+        let elements = grad_x
+            .iter_mut()
+            .zip(grad_y)
+            .zip(x_clamped)
+            .zip(interior)
+            .zip(grad_coef.chunks_exact_mut(grid));
+        for (ch, ((((gx, &gy), &xc), &inside), channel_grad)) in elements.enumerate() {
+            let (i, t) = segment(xc, du_dx, grid);
             let weights = cr_weights(t);
-            let control = cr_control_indices(i, grid);
-            let base = ch * grid;
+            let control = segments.controls[i];
             for k in 0..4 {
-                grad_coef[base + control[k]] += gy * weights[k];
+                channel_grad[control[k]] += gy * weights[k];
             }
             // The clamp's own Jacobian: `1` inside the closed interval, `0` outside. Read from
             // the recorded `interior` mask, not from `x_clamped` — the latter is always inside by
             // construction, which is what made this guard a tautology before 2026-08-25.
-            if c.interior[e] {
+            if inside {
                 let dweights = cr_weight_derivatives(t);
+                let c = segments.channel(ch)[i];
                 let mut dy_dt = 0.0;
                 for k in 0..4 {
-                    dy_dt += dweights[k] * coef[base + control[k]];
+                    dy_dt += dweights[k] * c[k];
                 }
-                c.grad_x[e] = gy * dy_dt * du_dx;
+                *gx = gy * dy_dt * du_dx;
             }
         }
     }
@@ -495,11 +554,12 @@ pub fn catmull_rom_backward_into(
     let blocks = grad_x.len().div_ceil(stride).max(1);
     let mut partials = vec![0.0f32; blocks * coef.len()];
 
+    let segments = Segments::of(coef, cache.channels, cache.grid);
     let kernel = |((((gx, gy), x_clamped), interior), local): BackwardZip<'_>| {
         // The chunk writes only interior elements; the rest are the clamp's zero.
         gx.fill(0.0);
         backward_chunk(
-            coef,
+            &segments,
             cache.channels,
             cache.grid,
             BackwardChunk {
