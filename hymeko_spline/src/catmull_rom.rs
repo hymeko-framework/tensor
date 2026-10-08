@@ -149,18 +149,39 @@ impl CatmullRomCache {
 }
 
 /// The CR segment of a clamped input: `(i, t)` with `u = (xc + 1) · span`, `i = min(⌊u⌋, grid − 2)`
-/// and `t = u − i`.
+/// and `t = u − i`, the index held as the float it is.
 ///
 /// **The one expression** the forward evaluates and the backward recomputes, which is what makes
-/// the recomputed segment bit-identical to the forward's.
+/// the recomputed segment bit-identical to the forward's. Written in floats so a pass over a row
+/// vectorises (Nagare plan 2026-10-08-orthtree-hypergraph-convolution, Amendment 1): `⌊u⌋` and
+/// `grid − 2` are small whole numbers, so their minimum and `u − i` are the integer form's bit for
+/// bit, and an input that is not a number takes segment `0`, as the saturating integer cast did.
 ///
 /// # Preconditions
-/// `xc ∈ [-1, 1]`, `span == 0.5 · (grid − 1)`, `grid >= 3`.
+/// `xc ∈ [-1, 1]` or NaN, `span == 0.5 · (grid − 1)`, `last == (grid − 2) as f32`, `grid >= 3`.
 #[inline(always)]
-fn segment(xc: f32, span: f32, grid: usize) -> (usize, f32) {
+fn segment(xc: f32, span: f32, last: f32) -> (f32, f32) {
     let u = (xc + 1.0) * span;
-    let i = (u.floor() as usize).min(grid - 2);
-    (i, u - i as f32)
+    let floor = u.floor();
+    let i = if floor >= 0.0 { floor.min(last) } else { 0.0 };
+    (i, u - i)
+}
+
+/// One row's per-channel values the forward's second pass reads, written by a first pass that
+/// vectorises: each element's segment and its four weights.
+struct RowPass {
+    segment: Vec<f32>,
+    weights: [Vec<f32>; 4],
+}
+
+impl RowPass {
+    fn new(channels: usize) -> Self {
+        let column = || vec![0.0f32; channels];
+        Self {
+            segment: column(),
+            weights: std::array::from_fn(|_| column()),
+        }
+    }
 }
 
 /// Each segment of each channel with what an element in it reads (Nagare plan
@@ -248,7 +269,8 @@ fn forward_block(
     w: ForwardRow<'_>,
 ) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
-    let span = 0.5 * (grid - 1) as f32;
+    let (span, last) = (0.5 * (grid - 1) as f32, (grid - 2) as f32);
+    let mut pass = RowPass::new(channels);
     let rows = w
         .out
         .chunks_exact_mut(channels)
@@ -256,21 +278,23 @@ fn forward_block(
         .zip(w.interior.chunks_exact_mut(channels))
         .zip(x_block.chunks_exact(channels));
     for (((out, x_clamped), interior), x) in rows {
-        for (ch, (((o, xc_out), inside), &raw)) in out
-            .iter_mut()
-            .zip(x_clamped.iter_mut())
-            .zip(interior.iter_mut())
-            .zip(x)
-            .enumerate()
-        {
+        // First pass, every channel at once: the clamp, the segment and the weights.
+        let [w0, w1, w2, w3] = &mut pass.weights;
+        for ch in 0..channels {
+            let raw = x[ch];
             let xc = raw.clamp(-1.0, 1.0);
-            let (i, t) = segment(xc, span, grid);
+            let (i, t) = segment(xc, span, last);
             let weights = cr_weights(t);
-            let c = segments.channel(ch)[i];
-            *o = weights[0] * c[0] + weights[1] * c[1] + weights[2] * c[2] + weights[3] * c[3];
-            *xc_out = xc;
+            (w0[ch], w1[ch], w2[ch], w3[ch]) = (weights[0], weights[1], weights[2], weights[3]);
+            pass.segment[ch] = i;
+            x_clamped[ch] = xc;
             // Closed interval: `±1` is interior, matching the guard this replaces.
-            *inside = (-1.0..=1.0).contains(&raw);
+            interior[ch] = (-1.0..=1.0).contains(&raw);
+        }
+        // Second pass: each element's four control values, by its segment.
+        for ch in 0..channels {
+            let c = segments.channel(ch)[pass.segment[ch] as usize];
+            out[ch] = w0[ch] * c[0] + w1[ch] * c[1] + w2[ch] * c[2] + w3[ch] * c[3];
         }
     }
 }
@@ -450,8 +474,10 @@ fn backward_chunk(
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
     // `du/dx` is the forward's `span`: one value, named for each of its two uses.
     let du_dx = 0.5 * (grid - 1) as f32;
+    let last = (grid - 2) as f32;
     // Rows outer, channels inner, as the forward: each channel's coefficients and segment table
-    // sit beside its element, and every coefficient still accumulates in element order.
+    // sit beside its element, and every coefficient still accumulates in element order. One pass:
+    // split into a vector pass and an element pass, as the forward is, it measured slower.
     let rows = c
         .grad_x
         .chunks_exact_mut(channels)
@@ -466,7 +492,8 @@ fn backward_chunk(
             .zip(interior)
             .zip(grad_coef.chunks_exact_mut(grid));
         for (ch, ((((gx, &gy), &xc), &inside), channel_grad)) in elements.enumerate() {
-            let (i, t) = segment(xc, du_dx, grid);
+            let (i, t) = segment(xc, du_dx, last);
+            let i = i as usize;
             let weights = cr_weights(t);
             let control = segments.controls[i];
             for k in 0..4 {
@@ -1016,8 +1043,11 @@ mod tests {
             // must still agree with the reference's, bit for bit.
             let span = 0.5 * (grid - 1) as f32;
             for e in 0..x.len() {
-                let (i, t) = segment(cache.x_clamped[e], span, grid);
-                assert_eq!(i, want_idx[e] as usize, "n={n}: segment index at {e}");
+                let (i, t) = segment(cache.x_clamped[e], span, (grid - 2) as f32);
+                assert_eq!(
+                    i as usize, want_idx[e] as usize,
+                    "n={n}: segment index at {e}"
+                );
                 assert_eq!(t.to_bits(), want_t[e].to_bits(), "n={n}: coordinate at {e}");
             }
             assert_eq!(
