@@ -167,19 +167,25 @@ fn segment(xc: f32, span: f32, last: f32) -> (f32, f32) {
     (i, u - i)
 }
 
-/// One row's per-channel values the forward's second pass reads, written by a first pass that
-/// vectorises: each element's segment and its four weights.
-struct RowPass {
-    segment: Vec<f32>,
-    weights: [Vec<f32>; 4],
+/// Elements per run of the two-pass kernels: what the first pass writes for a run stays in L1.
+const RUN: usize = 256;
+
+/// The first pass's values for a run of up to [`RUN`] elements: each element's segment index, its four
+/// weights and, for the pullback, their four derivatives. The first pass computes them for the
+/// whole run at once and vectorises; the second reads them beside the per-channel tables, which
+/// it indexes by channel and segment and which do not vectorise.
+struct ElementPass {
+    segment: [u32; RUN],
+    weights: [[f32; RUN]; 4],
+    dweights: [[f32; RUN]; 4],
 }
 
-impl RowPass {
-    fn new(channels: usize) -> Self {
-        let column = || vec![0.0f32; channels];
+impl ElementPass {
+    fn new() -> Self {
         Self {
-            segment: column(),
-            weights: std::array::from_fn(|_| column()),
+            segment: [0; RUN],
+            weights: [[0.0; RUN]; 4],
+            dweights: [[0.0; RUN]; 4],
         }
     }
 }
@@ -215,10 +221,9 @@ impl Segments {
         Self { quads, controls }
     }
 
-    /// Channel `ch`'s quadruples, one per segment.
-    fn channel(&self, ch: usize) -> &[[f32; 4]] {
-        let per = self.controls.len();
-        &self.quads[ch * per..(ch + 1) * per]
+    /// Channel `ch`'s four control values in segment `i`.
+    fn quad(&self, ch: usize, i: usize) -> [f32; 4] {
+        self.quads[ch * self.controls.len() + i]
     }
 }
 
@@ -253,9 +258,10 @@ struct ForwardRow<'a> {
 
 /// Evaluate the CR spline for every element of a whole block of rows.
 ///
-/// Iterating rows-then-channels (rather than one flat loop with `element %
-/// channels`) keeps the channel index a loop counter instead of an integer
-/// division — the modulo version measured ~24 % slower.
+/// One pass over runs of elements in row-major order, the channel a counter that wraps (not
+/// `element % channels`, which measured ~24 % slower): no per-row iterator setup, which at one
+/// channel cost as much as the arithmetic. Each run is two passes: the clamp, the segment and the
+/// weights of every element at once, then the control values by channel and segment.
 ///
 /// # Preconditions
 /// Every slice in `w` has the same length as `x_block`, which is a whole multiple
@@ -270,31 +276,49 @@ fn forward_block(
 ) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
     let (span, last) = (0.5 * (grid - 1) as f32, (grid - 2) as f32);
-    let mut pass = RowPass::new(channels);
-    let rows = w
+    let mut pass = ElementPass::new();
+    let mut ch = 0;
+    let runs = w
         .out
-        .chunks_exact_mut(channels)
-        .zip(w.x_clamped.chunks_exact_mut(channels))
-        .zip(w.interior.chunks_exact_mut(channels))
-        .zip(x_block.chunks_exact(channels));
-    for (((out, x_clamped), interior), x) in rows {
-        // First pass, every channel at once: the clamp, the segment and the weights.
-        let [w0, w1, w2, w3] = &mut pass.weights;
-        for ch in 0..channels {
-            let raw = x[ch];
+        .chunks_mut(RUN)
+        .zip(w.x_clamped.chunks_mut(RUN))
+        .zip(w.interior.chunks_mut(RUN))
+        .zip(x_block.chunks(RUN));
+    for (((out, x_clamped), interior), x) in runs {
+        let n = x.len();
+        let ElementPass {
+            segment: seg,
+            weights: [w0, w1, w2, w3],
+            ..
+        } = &mut pass;
+        let (seg, w0, w1, w2, w3) = (
+            &mut seg[..n],
+            &mut w0[..n],
+            &mut w1[..n],
+            &mut w2[..n],
+            &mut w3[..n],
+        );
+        let (out, x_clamped, interior) = (&mut out[..n], &mut x_clamped[..n], &mut interior[..n]);
+        // First pass, every element of the run at once: the clamp, the segment and the weights.
+        for e in 0..n {
+            let raw = x[e];
             let xc = raw.clamp(-1.0, 1.0);
             let (i, t) = segment(xc, span, last);
             let weights = cr_weights(t);
-            (w0[ch], w1[ch], w2[ch], w3[ch]) = (weights[0], weights[1], weights[2], weights[3]);
-            pass.segment[ch] = i;
-            x_clamped[ch] = xc;
+            (w0[e], w1[e], w2[e], w3[e]) = (weights[0], weights[1], weights[2], weights[3]);
+            seg[e] = i as u32;
+            x_clamped[e] = xc;
             // Closed interval: `±1` is interior, matching the guard this replaces.
-            interior[ch] = (-1.0..=1.0).contains(&raw);
+            interior[e] = (-1.0..=1.0).contains(&raw);
         }
-        // Second pass: each element's four control values, by its segment.
-        for ch in 0..channels {
-            let c = segments.channel(ch)[pass.segment[ch] as usize];
-            out[ch] = w0[ch] * c[0] + w1[ch] * c[1] + w2[ch] * c[2] + w3[ch] * c[3];
+        // Second pass: each element's four control values, by its channel and segment.
+        for e in 0..n {
+            let c = segments.quad(ch, seg[e] as usize);
+            out[e] = w0[e] * c[0] + w1[e] * c[1] + w2[e] * c[2] + w3[e] * c[3];
+            ch += 1;
+            if ch == channels {
+                ch = 0;
+            }
         }
     }
 }
@@ -477,53 +501,75 @@ fn backward_chunk(
     let last = (grid - 2) as f32;
     let segs = grid - 1;
     // The coefficient gradient by segment (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
-    // Amendment 3): one accumulator per segment, control slot and channel, `[segs][4][channels]`,
-    // each element adding into its own segment's four slots; the block's sums are folded into its
-    // coefficients in segment then slot order at the end. Per accumulator these are the additions
-    // of the segment-masked form, which added `0 · gy · w` into every other segment, in the same
-    // order without its zeros, so the bits are its bits for finite values. The masked form's
-    // pass over every segment made the pullback slower, not faster: 7x at one channel, 1.9x at 32
-    // (measured 2026-10-09).
-    let mut by_segment = vec![0.0f32; segs * 4 * channels];
-    let rows = c
+    // Amendments 3 and 6): one accumulator per channel and segment, four control slots wide, each
+    // element adding `gy · w` into its own segment's four slots at once; the chunk's sums are
+    // folded into its coefficients, per channel, in segment then slot order at the end. Per
+    // accumulator these are the additions of the segment-masked form, which added `0 · gy · w` into
+    // every other segment, in the same row order without its zeros, so the bits are its bits for
+    // finite values. The masked form's pass over every segment made the pullback slower, not
+    // faster: 7x at one channel, 1.9x at 32 (measured 2026-10-09).
+    let mut by_segment = vec![[0.0f32; 4]; channels * segs];
+    // Runs of elements in row-major order, the channel a counter that wraps, as the forward: the
+    // segments, weights and derivatives of a run at once, then its accumulators and input
+    // gradients by channel and segment.
+    let mut pass = ElementPass::new();
+    let mut ch = 0;
+    let runs = c
         .grad_x
-        .chunks_exact_mut(channels)
-        .zip(c.grad_y.chunks_exact(channels))
-        .zip(c.x_clamped.chunks_exact(channels))
-        .zip(c.interior.chunks_exact(channels));
-    for (((grad_x, grad_y), x_clamped), interior) in rows {
-        // Each element's segment and weights, its coefficient gradient into its segment's slots,
-        // and its input gradient as before: the clamp's own Jacobian is `1` inside the closed
-        // interval, `0` outside, read from the recorded `interior` mask (not from `x_clamped`,
-        // which is inside by construction).
-        let elements = grad_x
-            .iter_mut()
-            .zip(grad_y)
-            .zip(x_clamped)
-            .zip(interior)
-            .enumerate();
-        for (ch, (((gx, &gy), &xc), &inside)) in elements {
-            let (i, t) = segment(xc, du_dx, last);
-            let weights = cr_weights(t);
-            let slots = &mut by_segment[i as usize * 4 * channels..][..4 * channels];
-            for (slot, &wk) in slots.chunks_exact_mut(channels).zip(&weights) {
-                slot[ch] += gy * wk;
+        .chunks_mut(RUN)
+        .zip(c.grad_y.chunks(RUN))
+        .zip(c.x_clamped.chunks(RUN))
+        .zip(c.interior.chunks(RUN));
+    for (((grad_x, grad_y), x_clamped), interior) in runs {
+        let n = x_clamped.len();
+        let ElementPass {
+            segment: seg,
+            weights,
+            dweights,
+        } = &mut pass;
+        let seg = &mut seg[..n];
+        for e in 0..n {
+            let (i, t) = segment(x_clamped[e], du_dx, last);
+            seg[e] = i as u32;
+            let (w, dw) = (cr_weights(t), cr_weight_derivatives(t));
+            for k in 0..4 {
+                weights[k][e] = w[k];
+                dweights[k][e] = dw[k];
             }
-            if inside {
-                let dweights = cr_weight_derivatives(t);
-                let c = segments.channel(ch)[i as usize];
+        }
+        let (grad_x, grad_y, interior) = (&mut grad_x[..n], &grad_y[..n], &interior[..n]);
+        for e in 0..n {
+            let gy = grad_y[e];
+            // The element's channel and segment: its accumulator and its control values.
+            let at = ch * segs + seg[e] as usize;
+            let slots = &mut by_segment[at];
+            for k in 0..4 {
+                slots[k] += gy * weights[k][e];
+            }
+            // The input gradient as before: the clamp's own Jacobian is `1` inside the closed
+            // interval, `0` outside, read from the recorded `interior` mask (not from `x_clamped`,
+            // which is inside by construction).
+            grad_x[e] = if interior[e] {
+                let c = segments.quads[at];
                 let mut dy_dt = 0.0;
                 for k in 0..4 {
-                    dy_dt += dweights[k] * c[k];
+                    dy_dt += dweights[k][e] * c[k];
                 }
-                *gx = gy * dy_dt * du_dx;
+                gy * dy_dt * du_dx
+            } else {
+                0.0
+            };
+            ch += 1;
+            if ch == channels {
+                ch = 0;
             }
         }
     }
-    for (s, slots) in by_segment.chunks_exact(4 * channels).enumerate() {
-        for (acc, &j) in slots.chunks_exact(channels).zip(&segments.controls[s]) {
-            for (channel_grad, &a) in grad_coef.chunks_exact_mut(grid).zip(acc) {
-                channel_grad[j] += a;
+    let accumulators = by_segment.chunks_exact(segs);
+    for (channel_grad, accumulators) in grad_coef.chunks_exact_mut(grid).zip(accumulators) {
+        for (slots, controls) in accumulators.iter().zip(&segments.controls) {
+            for (&sum, &j) in slots.iter().zip(controls) {
+                channel_grad[j] += sum;
             }
         }
     }
@@ -556,8 +602,8 @@ pub fn catmull_rom_backward(
 }
 
 /// [`catmull_rom_backward`] with the input gradient written into `grad_x`, every element of it;
-/// returns the control-point gradient. Each block of `grad_x` is zeroed by the task that fills it,
-/// so the elements outside the clamp interval read `0` whatever the buffer held before.
+/// returns the control-point gradient. Every element of `grad_x` is written, `0` outside the clamp
+/// interval, whatever the buffer held before.
 ///
 /// # Preconditions
 /// As [`catmull_rom_backward`], and `grad_x.len() == grad_y.len()`.
@@ -597,8 +643,6 @@ pub fn catmull_rom_backward_into(
 
     let segments = Segments::of(coef, cache.channels, cache.grid);
     let kernel = |((((gx, gy), x_clamped), interior), local): BackwardZip<'_>| {
-        // The chunk writes only interior elements; the rest are the clamp's zero.
-        gx.fill(0.0);
         backward_chunk(
             &segments,
             cache.channels,
