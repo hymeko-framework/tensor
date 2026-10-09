@@ -476,14 +476,15 @@ fn backward_chunk(
     let du_dx = 0.5 * (grid - 1) as f32;
     let last = (grid - 2) as f32;
     let segs = grid - 1;
-    // The coefficient gradient, masked by segment (Nagare plan
-    // 2026-10-08-orthtree-hypergraph-convolution, Amendment 3): one accumulator per segment, control
-    // slot and channel, `[segs][4][channels]`, every element adding into its own segment's slots
-    // and zero into the others. The loops then run over contiguous channels with no data-dependent
-    // index, so they vectorise; the per-element scatter they replace did not. The block's sums are
-    // folded into its coefficients in segment then slot order at the end.
+    // The coefficient gradient by segment (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
+    // Amendment 3): one accumulator per segment, control slot and channel, `[segs][4][channels]`,
+    // each element adding into its own segment's four slots; the block's sums are folded into its
+    // coefficients in segment then slot order at the end. Per accumulator these are the additions
+    // of the segment-masked form, which added `0 · gy · w` into every other segment, in the same
+    // order without its zeros, so the bits are its bits for finite values. The masked form's
+    // pass over every segment made the pullback slower, not faster: 7x at one channel, 1.9x at 32
+    // (measured 2026-10-09).
     let mut by_segment = vec![0.0f32; segs * 4 * channels];
-    let mut pass = RowPass::new(channels);
     let rows = c
         .grad_x
         .chunks_exact_mut(channels)
@@ -491,10 +492,10 @@ fn backward_chunk(
         .zip(c.x_clamped.chunks_exact(channels))
         .zip(c.interior.chunks_exact(channels));
     for (((grad_x, grad_y), x_clamped), interior) in rows {
-        // Each element's segment and weights, and its input gradient as before: the clamp's own
-        // Jacobian is `1` inside the closed interval, `0` outside, read from the recorded
-        // `interior` mask (not from `x_clamped`, which is inside by construction).
-        let [w0, w1, w2, w3] = &mut pass.weights;
+        // Each element's segment and weights, its coefficient gradient into its segment's slots,
+        // and its input gradient as before: the clamp's own Jacobian is `1` inside the closed
+        // interval, `0` outside, read from the recorded `interior` mask (not from `x_clamped`,
+        // which is inside by construction).
         let elements = grad_x
             .iter_mut()
             .zip(grad_y)
@@ -504,8 +505,10 @@ fn backward_chunk(
         for (ch, (((gx, &gy), &xc), &inside)) in elements {
             let (i, t) = segment(xc, du_dx, last);
             let weights = cr_weights(t);
-            (w0[ch], w1[ch], w2[ch], w3[ch]) = (weights[0], weights[1], weights[2], weights[3]);
-            pass.segment[ch] = i;
+            let slots = &mut by_segment[i as usize * 4 * channels..][..4 * channels];
+            for (slot, &wk) in slots.chunks_exact_mut(channels).zip(&weights) {
+                slot[ch] += gy * wk;
+            }
             if inside {
                 let dweights = cr_weight_derivatives(t);
                 let c = segments.channel(ch)[i as usize];
@@ -514,15 +517,6 @@ fn backward_chunk(
                     dy_dt += dweights[k] * c[k];
                 }
                 *gx = gy * dy_dt * du_dx;
-            }
-        }
-        for (s, slots) in by_segment.chunks_exact_mut(4 * channels).enumerate() {
-            let here = s as f32;
-            for (acc, w) in slots.chunks_exact_mut(channels).zip(&pass.weights) {
-                for (((a, &gy), &wk), &i) in acc.iter_mut().zip(grad_y).zip(w).zip(&pass.segment) {
-                    let mask = f32::from(u8::from(i == here));
-                    *a += mask * gy * wk;
-                }
             }
         }
     }
