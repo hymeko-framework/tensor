@@ -74,5 +74,9 @@ fn backward_bits_are_identical_across_feature_configurations() {
 // Goldens captured 2026-08-19 on x86-64 with `+sse4.1`, verified identical with and without
 // `--features parallel`. They are a property of the arithmetic, not of the machine's core count.
 const GOLDEN_FORWARD: u64 = 14279475361876559898;
-const GOLDEN_GRAD_COEF: u64 = 6560660210728875162;
+// The coefficient gradient re-pinned 2026-10-09 (user decision "AVX2 és CR újrapinnelés"): its
+// terms are now summed per segment and control slot before they reach a coefficient, so the order
+// and the last bits moved; the same with and without `--features parallel`. The forward and the
+// input gradient keep their 2026-08-19 goldens.
+const GOLDEN_GRAD_COEF: u64 = 7303906485763388421;
 const GOLDEN_GRAD_X: u64 = 14151675965880936472;

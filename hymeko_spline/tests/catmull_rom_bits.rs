@@ -6,6 +6,13 @@
 //! shapes on both sides of the parallel threshold, three grids, and one and four threads. A rewrite
 //! that keeps every expression and every accumulation order keeps them all.
 //!
+//! **Re-pinned on 2026-10-09, coefficient gradient only** (user decision: "AVX2 és CR
+//! újrapinnelés"). The pullback's coefficient gradient now sums each block's elements per segment
+//! and control slot, then folds those sums into the coefficients, so the loops vectorise; a
+//! coefficient's terms are added in a different order and the last bits move. The output, the cache
+//! and the input gradient keep the `87116b6` fingerprints. The one-element shape keeps all five,
+//! since a single term has no order.
+//!
 //! No retired body is copied into the test tree: the oracle is the recorded bytes.
 
 use hymeko_spline::{catmull_rom_backward, catmull_rom_forward, PAR_MIN_ELEMS};
@@ -59,28 +66,28 @@ const RECORDED: [[u64; 5]; 5] = [
         0x0928_766a_74cc_3a07,
         0xdd19_2b39_5c64_5995,
         0x3f03_3da1_3ae4_7dfd,
-        0xa512_6825_1856_9127,
+        0xd69b_cc2f_eb81_3258,
     ],
     [
         0xf87c_0ff7_5e6c_8c8d,
         0xd7b7_fbf8_935a_f5ae,
         0xcee0_b8a0_9342_0275,
         0x0ee0_6894_60ad_f820,
-        0x5c1f_5681_4523_3c5e,
+        0x6ccc_2388_c0df_cab6,
     ],
     [
         0x172e_3169_7fd6_8aed,
         0x807b_f26a_d1c6_3fcb,
         0x51bd_a1e5_a365_4e25,
         0x4d3a_e248_571c_8f9b,
-        0x5358_6f90_63b3_b3eb,
+        0x5fad_5be1_6f5c_ab27,
     ],
     [
         0x7171_3298_d1e3_474a,
         0x360c_bac4_abe7_0a57,
         0xd74c_ba22_0e56_8c55,
         0x8103_3990_958b_096b,
-        0xd133_d077_ce89_5461,
+        0x81e9_894b_e32d_b17d,
     ],
 ];
 

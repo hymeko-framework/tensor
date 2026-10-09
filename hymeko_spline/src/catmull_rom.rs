@@ -475,9 +475,15 @@ fn backward_chunk(
     // `du/dx` is the forward's `span`: one value, named for each of its two uses.
     let du_dx = 0.5 * (grid - 1) as f32;
     let last = (grid - 2) as f32;
-    // Rows outer, channels inner, as the forward: each channel's coefficients and segment table
-    // sit beside its element, and every coefficient still accumulates in element order. One pass:
-    // split into a vector pass and an element pass, as the forward is, it measured slower.
+    let segs = grid - 1;
+    // The coefficient gradient, masked by segment (Nagare plan
+    // 2026-10-08-orthtree-hypergraph-convolution, Amendment 3): one accumulator per segment, control
+    // slot and channel, `[segs][4][channels]`, every element adding into its own segment's slots
+    // and zero into the others. The loops then run over contiguous channels with no data-dependent
+    // index, so they vectorise; the per-element scatter they replace did not. The block's sums are
+    // folded into its coefficients in segment then slot order at the end.
+    let mut by_segment = vec![0.0f32; segs * 4 * channels];
+    let mut pass = RowPass::new(channels);
     let rows = c
         .grad_x
         .chunks_exact_mut(channels)
@@ -485,31 +491,45 @@ fn backward_chunk(
         .zip(c.x_clamped.chunks_exact(channels))
         .zip(c.interior.chunks_exact(channels));
     for (((grad_x, grad_y), x_clamped), interior) in rows {
+        // Each element's segment and weights, and its input gradient as before: the clamp's own
+        // Jacobian is `1` inside the closed interval, `0` outside, read from the recorded
+        // `interior` mask (not from `x_clamped`, which is inside by construction).
+        let [w0, w1, w2, w3] = &mut pass.weights;
         let elements = grad_x
             .iter_mut()
             .zip(grad_y)
             .zip(x_clamped)
             .zip(interior)
-            .zip(grad_coef.chunks_exact_mut(grid));
-        for (ch, ((((gx, &gy), &xc), &inside), channel_grad)) in elements.enumerate() {
+            .enumerate();
+        for (ch, (((gx, &gy), &xc), &inside)) in elements {
             let (i, t) = segment(xc, du_dx, last);
-            let i = i as usize;
             let weights = cr_weights(t);
-            let control = segments.controls[i];
-            for k in 0..4 {
-                channel_grad[control[k]] += gy * weights[k];
-            }
-            // The clamp's own Jacobian: `1` inside the closed interval, `0` outside. Read from
-            // the recorded `interior` mask, not from `x_clamped` — the latter is always inside by
-            // construction, which is what made this guard a tautology before 2026-08-25.
+            (w0[ch], w1[ch], w2[ch], w3[ch]) = (weights[0], weights[1], weights[2], weights[3]);
+            pass.segment[ch] = i;
             if inside {
                 let dweights = cr_weight_derivatives(t);
-                let c = segments.channel(ch)[i];
+                let c = segments.channel(ch)[i as usize];
                 let mut dy_dt = 0.0;
                 for k in 0..4 {
                     dy_dt += dweights[k] * c[k];
                 }
                 *gx = gy * dy_dt * du_dx;
+            }
+        }
+        for (s, slots) in by_segment.chunks_exact_mut(4 * channels).enumerate() {
+            let here = s as f32;
+            for (acc, w) in slots.chunks_exact_mut(channels).zip(&pass.weights) {
+                for (((a, &gy), &wk), &i) in acc.iter_mut().zip(grad_y).zip(w).zip(&pass.segment) {
+                    let mask = f32::from(u8::from(i == here));
+                    *a += mask * gy * wk;
+                }
+            }
+        }
+    }
+    for (s, slots) in by_segment.chunks_exact(4 * channels).enumerate() {
+        for (acc, &j) in slots.chunks_exact(channels).zip(&segments.controls[s]) {
+            for (channel_grad, &a) in grad_coef.chunks_exact_mut(grid).zip(acc) {
+                channel_grad[j] += a;
             }
         }
     }
