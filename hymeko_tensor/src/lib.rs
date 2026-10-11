@@ -1,18 +1,34 @@
-//! # hymeko_tensor — the Tensor pillar's math + streamline
+//! Tensor storage, numerical contracts and kernels, independent of canonical IR.
 //!
-//! Two `std`-only, dependency-free foundations extracted from the Nagare learner so they can be reused and evolved
-//! independently of any concrete network:
+//! The default build is dependency-free: scalar algebra, degree computation,
+//! weight initialization, dense solvers ([`linalg`]), information estimators
+//! ([`renyi`]), and parameter layout ([`stream`]).
 //!
-//! - [`renyi`] — matrix-based Rényi-α=2 information estimators (Giraldo, Rao & Principe 2015): Gram matrices,
-//!   `S₂` entropy, mutual information and its gradient, Chebyshev feature maps, and the stable rank. All computed
-//!   from traces only, on flat row-major slices.
-//! - [`stream`] — the streamed HyMeKo IR format: a network's parameters in a single flat arena addressed by
-//!   precomputed offsets, with a bit-exact encode/decode round-trip. The learner ↔ stream bridge stays with the
-//!   learner; this crate owns only the format.
+//! Optional features:
+//! - `sparse`: COO/CSR storage and serial/Rayon kernels.
+//! - `interop`: sparse storage plus Nalgebra and JAX conversion.
+//! - `arrow-schema`: Arrow schemas for exchanging tensor data.
 //!
-//! Co-located in the `tensor` workspace with the geometric-algebra (`hymeko_clifford`) and hypergraph-incidence
-//! (`hymeko_graph`, now owned by the `hymeko/graph` repository) foundations of the Tensor pillar.
+//! Core owns canonical-IR adapters; Nagare owns graph-aware transformations
+//! and neural-network layers. Neither is a dependency of this crate.
 
 pub mod linalg;
 pub mod renyi;
 pub mod stream;
+
+pub mod aggregation;
+#[cfg(feature = "arrow-schema")]
+pub mod arrow_schema;
+pub mod common;
+pub mod compute;
+pub mod conv;
+#[cfg(feature = "sparse")]
+pub mod representations;
+#[cfg(feature = "sparse")]
+#[doc(hidden)]
+pub mod sparse_workload;
+#[cfg(feature = "interop")]
+pub mod tensor_convert;
+pub mod tensor_val;
+#[cfg(feature = "sparse")]
+pub mod util;

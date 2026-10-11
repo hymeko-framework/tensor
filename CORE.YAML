@@ -138,7 +138,12 @@ core:
   # See `../nagare/reports/2026-08-24-hymeko-vision-core-crate.md`.
   - hymeko_vision
 
-  # HyMeKoStream IR + matrix-based Rényi-2 estimators.
+  # Numeric scalar contracts, COO/CSR storage and kernels, initialization,
+  # interop, HyMeKoStream layout and matrix-based Rényi-2 estimators.
+  # User-authorized 2026-09-23: numeric code and tests moved from Core.
+  # Default production build remains dependency-free; sparse enables Rayon,
+  # interop enables Nalgebra/num-traits, arrow-schema enables Arrow.
+  # Migration ledger: ../core/docs/hymeko-kernel-ownership.md.
   # Was an orphan (zero reverse dependencies) until 2026-08-19, while six of its `renyi.rs`
   # functions sat copied inside `nagare/examples/nagare_deep_signed.rs`. Now linked by `nagare`,
   # and the copies are retired. Keep it the single source of truth — do not re-copy from it.
