@@ -4,11 +4,11 @@
 
 use std::cell::Cell;
 
-use hymeko_tensor::compute::ComputeError;
 use hymeko_tensor::compute::arena::{
     AllocationKey, ArenaBackend, ArenaConfig, ArenaEpoch, ArenaStats, HostArena, HostResource,
     Pool, ReusePolicy,
 };
+use hymeko_tensor::compute::ComputeError;
 
 /// A device whose allocations are numbered in creation order, sized exactly, and classed by a
 /// small tag. `GROWS` selects whether it can grow an allocation in place.

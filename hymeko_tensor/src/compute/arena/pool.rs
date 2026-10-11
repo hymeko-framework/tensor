@@ -149,12 +149,15 @@ impl<B: ArenaBackend> Pool<B> {
     ) -> Result<AllocationKey<B::Class>, ComputeError> {
         let bytes = match self.config.reuse_policy {
             ReusePolicy::ExactSize | ReusePolicy::BestFit => bytes,
-            ReusePolicy::SizeClass => bytes.checked_next_power_of_two().ok_or(
-                ComputeError::IndexOverflow {
-                    what: "allocation size class exceeds the largest representable power of two",
-                    value: usize::try_from(bytes).unwrap_or(usize::MAX),
-                },
-            )?,
+            ReusePolicy::SizeClass => {
+                bytes
+                    .checked_next_power_of_two()
+                    .ok_or(ComputeError::IndexOverflow {
+                        what:
+                            "allocation size class exceeds the largest representable power of two",
+                        value: usize::try_from(bytes).unwrap_or(usize::MAX),
+                    })?
+            }
         };
         Ok(AllocationKey { bytes, class })
     }
