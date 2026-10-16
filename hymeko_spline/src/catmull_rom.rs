@@ -41,6 +41,8 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::knots::Knots;
+
 /// Row-parallelism is used only when `n * channels` reaches this many elements.
 ///
 /// **Measured crossover, not a guess.** The `kan_cr_threshold` bench group run at
@@ -135,8 +137,10 @@ pub struct CatmullRomCache {
     pub n: usize,
     /// Channel count.
     pub channels: usize,
-    /// Number of CR control points per channel.
+    /// Number of CR control points per channel: the knots' count.
     pub grid: usize,
+    /// The knots the forward evaluated over; the backward locates each element's leaf in them again.
+    pub knots: Option<Knots>,
 }
 
 impl CatmullRomCache {
@@ -148,14 +152,15 @@ impl CatmullRomCache {
     }
 }
 
-/// The CR segment of a clamped input: `(i, t)` with `u = (xc + 1) · span`, `i = min(⌊u⌋, grid − 2)`
-/// and `t = u − i`, the index held as the float it is.
+/// The CR segment of a clamped input over uniform knots: `(i, t)` with `u = (xc + 1) · span`,
+/// `i = min(⌊u⌋, grid − 2)` and `t = u − i`, the index held as the float it is.
 ///
-/// **The one expression** the forward evaluates and the backward recomputes, which is what makes
-/// the recomputed segment bit-identical to the forward's. Written in floats so a pass over a row
-/// vectorises (Nagare plan 2026-10-08-orthtree-hypergraph-convolution, Amendment 1): `⌊u⌋` and
+/// **The one expression** the uniform forward evaluates and its backward recomputes, which is what
+/// makes the recomputed segment bit-identical to the forward's. Written in floats so a pass over a
+/// row vectorises (Nagare plan 2026-10-08-orthtree-hypergraph-convolution, Amendment 1): `⌊u⌋` and
 /// `grid − 2` are small whole numbers, so their minimum and `u − i` are the integer form's bit for
 /// bit, and an input that is not a number takes segment `0`, as the saturating integer cast did.
+/// Refined knots locate their leaf by [`Knots::locate`], the same steps with a dyadic one after.
 ///
 /// # Preconditions
 /// `xc ∈ [-1, 1]` or NaN, `span == 0.5 · (grid − 1)`, `last == (grid − 2) as f32`, `grid >= 3`.
@@ -178,6 +183,8 @@ struct ElementPass {
     segment: [u32; RUN],
     weights: [[f32; RUN]; 4],
     dweights: [[f32; RUN]; 4],
+    /// Each element's leaf scale `2^d` onto its `t` (refined knots; `1` over uniform ones).
+    scale: [f32; RUN],
 }
 
 impl ElementPass {
@@ -186,6 +193,7 @@ impl ElementPass {
             segment: [0; RUN],
             weights: [[0.0; RUN]; 4],
             dweights: [[0.0; RUN]; 4],
+            scale: [1.0; RUN],
         }
     }
 }
@@ -206,15 +214,14 @@ struct Segments {
 }
 
 impl Segments {
-    /// The table of `coef`, `channels × grid`.
+    /// The table of `coef`, `channels × knots.len()`, by leaf.
     ///
     /// # Preconditions
-    /// `grid >= 3` and `coef.len() == channels · grid`.
-    fn of(coef: &[f32], channels: usize, grid: usize) -> Self {
-        let controls: Vec<[usize; 4]> =
-            (0..grid - 1).map(|i| cr_control_indices(i, grid)).collect();
+    /// `coef.len() == channels · knots.len()`.
+    fn of(coef: &[f32], channels: usize, knots: &Knots) -> Self {
+        let controls: Vec<[usize; 4]> = knots.controls().to_vec();
         let quads = coef
-            .chunks_exact(grid)
+            .chunks_exact(knots.len())
             .take(channels)
             .flat_map(|channel| controls.iter().map(move |c| c.map(|j| channel[j])))
             .collect();
@@ -267,15 +274,15 @@ struct ForwardRow<'a> {
 /// Every slice in `w` has the same length as `x_block`, which is a whole multiple
 /// of `channels`; `coef.len() == channels * grid`; `grid >= 3`.
 #[inline(always)]
-fn forward_block(
+fn forward_block<const UNIFORM: bool>(
     segments: &Segments,
-    grid: usize,
+    knots: &Knots,
     channels: usize,
     x_block: &[f32],
     w: ForwardRow<'_>,
 ) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
-    let (span, last) = (0.5 * (grid - 1) as f32, (grid - 2) as f32);
+    let (span, last) = (0.5 * (knots.grid() - 1) as f32, (knots.grid() - 2) as f32);
     let mut pass = ElementPass::new();
     let mut ch = 0;
     let runs = w
@@ -303,10 +310,15 @@ fn forward_block(
         for e in 0..n {
             let raw = x[e];
             let xc = raw.clamp(-1.0, 1.0);
-            let (i, t) = segment(xc, span, last);
-            let weights = cr_weights(t);
+            let (leaf, weights) = if UNIFORM {
+                let (i, t) = segment(xc, span, last);
+                (i as u32, cr_weights(t))
+            } else {
+                let (leaf, t, _) = knots.locate(xc, span);
+                (leaf as u32, refined_weights(knots, leaf, t))
+            };
             (w0[e], w1[e], w2[e], w3[e]) = (weights[0], weights[1], weights[2], weights[3]);
-            seg[e] = i as u32;
+            seg[e] = leaf;
             x_clamped[e] = xc;
             // Closed interval: `±1` is interior, matching the guard this replaces.
             interior[e] = (-1.0..=1.0).contains(&raw);
@@ -323,12 +335,29 @@ fn forward_block(
     }
 }
 
+/// [`forward_block`] instantiated for the knots: uniform knots take the uniform segment arithmetic,
+/// which vectorises; refined ones locate their leaves. One choice per call, never per element.
+#[inline(always)]
+fn forward_block_over(
+    segments: &Segments,
+    knots: &Knots,
+    channels: usize,
+    x_block: &[f32],
+    w: ForwardRow<'_>,
+) {
+    if knots.is_uniform() {
+        forward_block::<true>(segments, knots, channels, x_block, w);
+    } else {
+        forward_block::<false>(segments, knots, channels, x_block, w);
+    }
+}
+
 /// Forward Catmull--Rom activation.
 ///
 /// # Preconditions
-/// - `grid >= 3`
 /// - `x.len() == n * channels`
-/// - `coef.len() == channels * grid`
+/// - `coef.len() == channels * knots.len()`: one control point per knot ([`Knots`]; the uniform
+///   grid of `g` points is `Knots::uniform(g)`)
 ///
 /// # Postconditions
 /// Returns output flat `(n, channels)` and a cache for backward. Inputs are
@@ -340,7 +369,7 @@ pub fn catmull_rom_forward(
     x: &[f32],
     n: usize,
     channels: usize,
-    grid: usize,
+    knots: &Knots,
 ) -> (Vec<f32>, CatmullRomCache) {
     let mut out = vec![0.0; x.len()];
     let mut cache = CatmullRomCache::default();
@@ -348,7 +377,7 @@ pub fn catmull_rom_forward(
         out: &mut out,
         cache: &mut cache,
     };
-    catmull_rom_forward_into(coef, x, n, channels, grid, into);
+    catmull_rom_forward_into(coef, x, n, channels, knots, into);
     (out, cache)
 }
 
@@ -375,7 +404,7 @@ pub fn catmull_rom_forward_into(
     x: &[f32],
     n: usize,
     channels: usize,
-    grid: usize,
+    knots: &Knots,
     into: CatmullRomBuffers<'_>,
 ) {
     let CatmullRomBuffers { out, cache } = into;
@@ -384,12 +413,8 @@ pub fn catmull_rom_forward_into(
     // `cr_control_indices` already performs. The CogInfoCom HSiKAN configuration uses grid 3, which
     // is why the minimum moved from 4. Grid 2 is out of contract here — not asserted to be
     // mathematically impossible, simply not a configuration this operator is certified for.
-    assert!(
-        grid >= 3,
-        "Catmull--Rom needs at least 3 control points, got {grid}"
-    );
     assert_eq!(x.len(), n * channels);
-    assert_eq!(coef.len(), channels * grid);
+    assert_eq!(coef.len(), channels * knots.len());
     assert_eq!(out.len(), x.len(), "out must be (n, channels)");
 
     // Refilled, not rebuilt: `resize` keeps the capacity, and the blocks below overwrite every
@@ -398,9 +423,10 @@ pub fn catmull_rom_forward_into(
     cache.interior.resize(x.len(), false);
     cache.n = n;
     cache.channels = channels;
-    cache.grid = grid;
+    cache.grid = knots.len();
+    cache.knots = Some(knots.clone());
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let segments = Segments::of(coef, channels, grid);
+    let segments = Segments::of(coef, channels, knots);
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
     // parallel result is bit-identical to the sequential one at any thread count.
@@ -413,9 +439,9 @@ pub fn catmull_rom_forward_into(
             .zip(interior.par_chunks_mut(stride))
             .zip(x.par_chunks(stride))
             .for_each(|(((out_b, xc_b), in_b), x_b)| {
-                forward_block(
+                forward_block_over(
                     &segments,
-                    grid,
+                    knots,
                     channels,
                     x_b,
                     ForwardRow {
@@ -426,9 +452,9 @@ pub fn catmull_rom_forward_into(
                 );
             });
     } else {
-        forward_block(
+        forward_block_over(
             &segments,
-            grid,
+            knots,
             channels,
             x,
             ForwardRow {
@@ -440,9 +466,9 @@ pub fn catmull_rom_forward_into(
     }
 
     #[cfg(not(feature = "parallel"))]
-    forward_block(
+    forward_block_over(
         &segments,
-        grid,
+        knots,
         channels,
         x,
         ForwardRow {
@@ -488,18 +514,18 @@ struct BackwardChunk<'a> {
 /// `grad_x` is *written* (each element assigned once); `grad_coef` is
 /// *accumulated* into, so the caller owns its initial value.
 #[inline(always)]
-fn backward_chunk(
+fn backward_chunk<const UNIFORM: bool>(
     segments: &Segments,
     channels: usize,
-    grid: usize,
+    knots: &Knots,
     c: BackwardChunk<'_>,
     grad_coef: &mut [f32],
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
     // `du/dx` is the forward's `span`: one value, named for each of its two uses.
-    let du_dx = 0.5 * (grid - 1) as f32;
-    let last = (grid - 2) as f32;
-    let segs = grid - 1;
+    let du_dx = 0.5 * (knots.grid() - 1) as f32;
+    let last = (knots.grid() - 2) as f32;
+    let segs = knots.controls().len();
     // The coefficient gradient by segment (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
     // Amendments 3 and 6): one accumulator per channel and segment, four control slots wide, each
     // element adding `gy · w` into its own segment's four slots at once; the chunk's sums are
@@ -526,12 +552,23 @@ fn backward_chunk(
             segment: seg,
             weights,
             dweights,
+            scale,
         } = &mut pass;
         let seg = &mut seg[..n];
         for e in 0..n {
-            let (i, t) = segment(x_clamped[e], du_dx, last);
-            seg[e] = i as u32;
-            let (w, dw) = (cr_weights(t), cr_weight_derivatives(t));
+            let (w, dw) = if UNIFORM {
+                let (i, t) = segment(x_clamped[e], du_dx, last);
+                seg[e] = i as u32;
+                (cr_weights(t), cr_weight_derivatives(t))
+            } else {
+                let (leaf, t, cells) = knots.locate(x_clamped[e], du_dx);
+                seg[e] = leaf as u32;
+                scale[e] = cells;
+                (
+                    refined_weights(knots, leaf, t),
+                    refined_weight_derivatives(knots, leaf, t),
+                )
+            };
             for k in 0..4 {
                 weights[k][e] = w[k];
                 dweights[k][e] = dw[k];
@@ -555,7 +592,12 @@ fn backward_chunk(
                 for k in 0..4 {
                     dy_dt += dweights[k][e] * c[k];
                 }
-                gy * dy_dt * du_dx
+                // A leaf at depth `d` is `2^d` times narrower in `u`: `dt/dx = span · 2^d`.
+                if UNIFORM {
+                    gy * dy_dt * du_dx
+                } else {
+                    gy * dy_dt * (du_dx * scale[e])
+                }
             } else {
                 0.0
             };
@@ -566,7 +608,7 @@ fn backward_chunk(
         }
     }
     let accumulators = by_segment.chunks_exact(segs);
-    for (channel_grad, accumulators) in grad_coef.chunks_exact_mut(grid).zip(accumulators) {
+    for (channel_grad, accumulators) in grad_coef.chunks_exact_mut(knots.len()).zip(accumulators) {
         for (slots, controls) in accumulators.iter().zip(&segments.controls) {
             for (&sum, &j) in slots.iter().zip(controls) {
                 channel_grad[j] += sum;
@@ -619,6 +661,10 @@ pub fn catmull_rom_backward_into(
     assert_eq!(grad_y.len(), cache.n * cache.channels);
     assert_eq!(coef.len(), cache.channels * cache.grid);
     assert_eq!(grad_x.len(), grad_y.len(), "grad_x must be (n, channels)");
+    let knots = cache
+        .knots
+        .as_ref()
+        .expect("a forward wrote the cache, and recorded its knots");
 
     let mut grad_coef = vec![0.0; coef.len()];
 
@@ -641,20 +687,21 @@ pub fn catmull_rom_backward_into(
     let blocks = grad_x.len().div_ceil(stride).max(1);
     let mut partials = vec![0.0f32; blocks * coef.len()];
 
-    let segments = Segments::of(coef, cache.channels, cache.grid);
+    let segments = Segments::of(coef, cache.channels, knots);
+    let uniform = knots.is_uniform();
     let kernel = |((((gx, gy), x_clamped), interior), local): BackwardZip<'_>| {
-        backward_chunk(
-            &segments,
-            cache.channels,
-            cache.grid,
-            BackwardChunk {
-                grad_x: gx,
-                grad_y: gy,
-                x_clamped,
-                interior,
-            },
-            local,
-        );
+        let chunk = BackwardChunk {
+            grad_x: gx,
+            grad_y: gy,
+            x_clamped,
+            interior,
+        };
+        // One choice per call: uniform knots take the uniform segment arithmetic.
+        if uniform {
+            backward_chunk::<true>(&segments, cache.channels, knots, chunk, local);
+        } else {
+            backward_chunk::<false>(&segments, cache.channels, knots, chunk, local);
+        }
     };
 
     #[cfg(feature = "parallel")]
@@ -769,7 +816,8 @@ pub fn chebyshev_cr_forward_into(
 ) -> (Vec<f32>, Vec<f32>) {
     let basis = chebyshev_knot_basis(grid, k);
     let control = chebyshev_control_points(coef, &basis, channels, grid, k);
-    catmull_rom_forward_into(&control, x, n, channels, grid, into);
+    // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
+    catmull_rom_forward_into(&control, x, n, channels, &Knots::uniform(grid), into);
     (control, basis)
 }
 
@@ -950,13 +998,27 @@ fn cr_weight_derivatives(t: f32) -> [f32; 4] {
     ]
 }
 
-fn cr_control_indices(i: usize, grid: usize) -> [usize; 4] {
-    [
-        i.saturating_sub(1).min(grid - 1),
-        i.min(grid - 1),
-        (i + 1).min(grid - 1),
-        (i + 2).min(grid - 1),
-    ]
+/// The weights of refined knots' leaf `leaf` at `t`: the non-uniform Catmull–Rom, the cubic Hermite
+/// with tangents `(p_{k+1} − p_{k−1}) / (x_{k+1} − x_{k−1})`: `(−h₁₀ r₀, h₀₀ − h₁₁ r₁, h₀₁ + h₁₀ r₀,
+/// h₁₁ r₁)` with the leaf's tangent shares -- the uniform weights in exact arithmetic where both
+/// shares are ½. One form for every leaf, no branch per element (measured 2026-10-16: −7 % forward,
+/// −6 % backward at level 4 against a branch to the uniform expressions).
+#[inline(always)]
+fn refined_weights(knots: &Knots, leaf: usize, t: f32) -> [f32; 4] {
+    let (t2, [r0, r1]) = (t * t, knots.leaf_ratio(leaf));
+    let t3 = t2 * t;
+    let (h00, h10) = (2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t);
+    let (h01, h11) = (-2.0 * t3 + 3.0 * t2, t3 - t2);
+    [-h10 * r0, h00 - h11 * r1, h01 + h10 * r0, h11 * r1]
+}
+
+/// The `t`-derivatives of [`refined_weights`].
+#[inline(always)]
+fn refined_weight_derivatives(knots: &Knots, leaf: usize, t: f32) -> [f32; 4] {
+    let (t2, [r0, r1]) = (t * t, knots.leaf_ratio(leaf));
+    let (d00, d10) = (6.0 * t2 - 6.0 * t, 3.0 * t2 - 4.0 * t + 1.0);
+    let (d01, d11) = (-6.0 * t2 + 6.0 * t, 3.0 * t2 - 2.0 * t);
+    [-d10 * r0, d00 - d11 * r1, d01 + d10 * r0, d11 * r1]
 }
 
 fn chebyshev_terms(x: f32, k: usize) -> Vec<f32> {
@@ -976,10 +1038,21 @@ fn chebyshev_terms(x: f32, k: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    /// The uniform grid's control indices, the ends replicated: the naive reference's own, as the
+    /// kernel read them before the knots carried them.
+    fn cr_control_indices(i: usize, grid: usize) -> [usize; 4] {
+        [
+            i.saturating_sub(1).min(grid - 1),
+            i.min(grid - 1),
+            (i + 1).min(grid - 1),
+            (i + 2).min(grid - 1),
+        ]
+    }
+
     use super::*;
 
     fn loss_sum_cr(coef: &[f32], x: &[f32], n: usize, channels: usize, grid: usize) -> f32 {
-        catmull_rom_forward(coef, x, n, channels, grid)
+        catmull_rom_forward(coef, x, n, channels, &crate::knots::Knots::uniform(grid))
             .0
             .iter()
             .sum()
@@ -1093,12 +1166,13 @@ mod tests {
         for n in [1usize, 7, 511, 513, 1600, 1601, 4099] {
             let x = pseudo_input(n * channels, 1);
             let coef = pseudo_input(channels * grid, 2);
-            let (out, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+            let (out, cache) =
+                catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid));
             let (want_out, want_xc, want_idx, want_t) = naive_forward(&coef, &x, n, channels, grid);
             assert_eq!(out, want_out, "n={n}: output must be bit-exact");
             assert_eq!(cache.x_clamped, want_xc, "n={n}: clamped input");
-            // The cache no longer stores the segment; the one expression both passes evaluate
-            // must still agree with the reference's, bit for bit.
+            // The cache no longer stores the segment; the one expression both passes evaluate over
+            // uniform knots must still agree with the reference's, bit for bit.
             let span = 0.5 * (grid - 1) as f32;
             for e in 0..x.len() {
                 let (i, t) = segment(cache.x_clamped[e], span, (grid - 2) as f32);
@@ -1126,7 +1200,8 @@ mod tests {
             let x = pseudo_input(n * channels, 3);
             let coef = pseudo_input(channels * grid, 4);
             let grad_y = pseudo_input(n * channels, 5);
-            let (_, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+            let (_, cache) =
+                catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid));
             let got = catmull_rom_backward(&coef, &cache, &grad_y);
             let (want_gx, want_gc) = naive_backward(&coef, &cache, &grad_y);
 
@@ -1153,7 +1228,8 @@ mod tests {
         let x = pseudo_input(n * channels, 6);
         let coef = pseudo_input(channels * grid, 7);
         let grad_y = pseudo_input(n * channels, 8);
-        let (_, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+        let (_, cache) =
+            catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid));
 
         let run = |threads: usize| {
             rayon::ThreadPoolBuilder::new()
@@ -1188,7 +1264,9 @@ mod tests {
                 .num_threads(threads)
                 .build()
                 .expect("thread pool")
-                .install(|| catmull_rom_forward(&coef, &x, n, channels, grid))
+                .install(|| {
+                    catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid))
+                })
         };
         let (reference, _) = run(1);
         for threads in [2usize, 8, 16] {
@@ -1233,7 +1311,7 @@ mod tests {
     fn catmull_rom_interpolates_control_points() {
         let coef = vec![0.0, 1.0, 4.0, 9.0, 16.0];
         let x = vec![-1.0, -0.5, 0.0, 0.5, 1.0];
-        let (y, _) = catmull_rom_forward(&coef, &x, 5, 1, 5);
+        let (y, _) = catmull_rom_forward(&coef, &x, 5, 1, &crate::knots::Knots::uniform(5));
         for (got, want) in y.iter().zip(coef.iter()) {
             assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
         }
@@ -1246,7 +1324,8 @@ mod tests {
         let grid = 5;
         let coef = vec![0.1, -0.2, 0.3, 0.7, -0.1, 0.5, -0.4, 0.2, 0.1, 0.9];
         let x = vec![-0.7, -0.2, 0.15, 0.4, 0.72, -0.55];
-        let (_, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+        let (_, cache) =
+            catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid));
         let grad_y = vec![1.0; x.len()];
         let grad = catmull_rom_backward(&coef, &cache, &grad_y);
         let eps = 1e-3;

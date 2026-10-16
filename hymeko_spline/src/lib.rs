@@ -39,6 +39,8 @@
 
 /// Catmull-Rom and Chebyshev-CR kernels on flat row-major `f32` slices.
 pub mod catmull_rom;
+/// The knots a Catmull–Rom spline interpolates: a uniform base grid, each segment refined on a dyadic orthtree.
+pub mod knots;
 /// Kochanek-Bartels (TCB) spline kernels.
 pub mod kochanek_bartels;
 /// Rational B-spline curves and parameter derivatives in f64 homogeneous coordinates.
@@ -51,4 +53,5 @@ pub use catmull_rom::{
     chebyshev_deploy_forward, chebyshev_knot_basis, CatmullRomBackward, CatmullRomBuffers,
     CatmullRomCache, ChebyshevCrBackward, PAR_MIN_ELEMS,
 };
+pub use knots::Knots;
 pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};

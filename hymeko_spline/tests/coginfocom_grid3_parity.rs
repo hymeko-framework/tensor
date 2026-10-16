@@ -217,7 +217,13 @@ fn grid3_matches_the_recovered_pytorch_evaluator() {
     let mut worst_gc = 0.0f64;
 
     for c in &cs {
-        let (out, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
+        let (out, cache) = catmull_rom_forward(
+            &c.coef,
+            &c.x,
+            c.batch,
+            c.channels,
+            &hymeko_spline::Knots::uniform(c.grid),
+        );
         let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
 
         // Forward: bit identity, asserted — not a tolerance.
@@ -268,7 +274,13 @@ fn saturated_inputs_have_exactly_zero_corrected_input_gradient() {
     let cs = cases();
     let mut saturated = 0usize;
     for c in &cs {
-        let (_, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
+        let (_, cache) = catmull_rom_forward(
+            &c.coef,
+            &c.x,
+            c.batch,
+            c.channels,
+            &hymeko_spline::Knots::uniform(c.grid),
+        );
         let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
         for (k, &raw) in c.x.iter().enumerate() {
             if !(-1.0..=1.0).contains(&raw) {
@@ -293,7 +305,13 @@ fn endpoints_are_interior_and_the_knot_is_approached_from_both_sides() {
     let cs = cases();
     let mut endpoints = 0usize;
     for c in &cs {
-        let (_, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
+        let (_, cache) = catmull_rom_forward(
+            &c.coef,
+            &c.x,
+            c.batch,
+            c.channels,
+            &hymeko_spline::Knots::uniform(c.grid),
+        );
         let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
         for (k, &raw) in c.x.iter().enumerate() {
             if raw == -1.0 || raw == 1.0 {
@@ -371,7 +389,13 @@ fn measure_error_distribution() {
         let mut worst_rel = 0.0f64;
         let mut opposite = 0usize;
         for c in cases() {
-            let (out, cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
+            let (out, cache) = catmull_rom_forward(
+                &c.coef,
+                &c.x,
+                c.batch,
+                c.channels,
+                &hymeko_spline::Knots::uniform(c.grid),
+            );
             let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
             let (g, w): (Vec<f32>, Vec<f32>) = match sel {
                 0 => (out, c.y.clone()),
@@ -458,7 +482,13 @@ fn reference_cr(coef: &[f32], x: f32, grid: usize, padding: Padding, reversed: b
 #[test]
 fn the_reference_reproduces_the_operator_bit_for_bit_under_replication() {
     for c in cases() {
-        let (out, _) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
+        let (out, _) = catmull_rom_forward(
+            &c.coef,
+            &c.x,
+            c.batch,
+            c.channels,
+            &hymeko_spline::Knots::uniform(c.grid),
+        );
         for row in 0..c.batch {
             for ch in 0..c.channels {
                 let k = row * c.channels + ch;
@@ -549,13 +579,25 @@ fn a_materially_wrong_implementation_is_rejected() {
 #[test]
 fn perturbing_a_single_coefficient_moves_forward_and_its_gradient() {
     let c = &cases()[4];
-    let (base_out, base_cache) = catmull_rom_forward(&c.coef, &c.x, c.batch, c.channels, c.grid);
+    let (base_out, base_cache) = catmull_rom_forward(
+        &c.coef,
+        &c.x,
+        c.batch,
+        c.channels,
+        &hymeko_spline::Knots::uniform(c.grid),
+    );
     let base = catmull_rom_backward(&c.coef, &base_cache, &c.grad_y);
 
     let mut bumped = c.coef.clone();
     let target = 1usize; // interior control point of channel 0
     bumped[target] += 0.5;
-    let (out, cache) = catmull_rom_forward(&bumped, &c.x, c.batch, c.channels, c.grid);
+    let (out, cache) = catmull_rom_forward(
+        &bumped,
+        &c.x,
+        c.batch,
+        c.channels,
+        &hymeko_spline::Knots::uniform(c.grid),
+    );
     let back = catmull_rom_backward(&bumped, &cache, &c.grad_y);
 
     assert!(
@@ -582,5 +624,5 @@ fn perturbing_a_single_coefficient_moves_forward_and_its_gradient() {
 fn grid_two_is_still_rejected() {
     let coef = [0.5f32, -0.25];
     let x = [0.3f32];
-    let _ = catmull_rom_forward(&coef, &x, 1, 1, 2);
+    let _ = catmull_rom_forward(&coef, &x, 1, 1, &hymeko_spline::Knots::uniform(2));
 }

@@ -94,7 +94,8 @@ const RECORDED: [[u64; 5]; 5] = [
 fn run(n: usize, channels: usize, grid: usize, seed: u64) -> [u64; 5] {
     let (x, coef) = (field(n * channels, seed), field(channels * grid, 10 + seed));
     let grad_y = field(n * channels, 20 + seed);
-    let (out, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+    let (out, cache) =
+        catmull_rom_forward(&coef, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
     let back = catmull_rom_backward(&coef, &cache, &grad_y);
     let bits = |v: &[f32]| fingerprint(v.iter().map(|x| x.to_bits()));
     [

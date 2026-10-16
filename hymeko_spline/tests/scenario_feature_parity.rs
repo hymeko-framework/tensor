@@ -46,7 +46,7 @@ const GRID: usize = 6;
 fn forward_bits_are_identical_across_feature_configurations() {
     let x = pseudo_input(N * CHANNELS, 6);
     let coef = pseudo_input(CHANNELS * GRID, 7);
-    let (y, _) = catmull_rom_forward(&coef, &x, N, CHANNELS, GRID);
+    let (y, _) = catmull_rom_forward(&coef, &x, N, CHANNELS, &hymeko_spline::Knots::uniform(GRID));
     assert_eq!(
         bits_hash(&y),
         GOLDEN_FORWARD,
@@ -61,7 +61,8 @@ fn backward_bits_are_identical_across_feature_configurations() {
     let x = pseudo_input(N * CHANNELS, 6);
     let coef = pseudo_input(CHANNELS * GRID, 7);
     let grad_y = pseudo_input(N * CHANNELS, 8);
-    let (_, cache) = catmull_rom_forward(&coef, &x, N, CHANNELS, GRID);
+    let (_, cache) =
+        catmull_rom_forward(&coef, &x, N, CHANNELS, &hymeko_spline::Knots::uniform(GRID));
     let bwd = catmull_rom_backward(&coef, &cache, &grad_y);
     assert_eq!(
         bits_hash(&bwd.grad_coef),

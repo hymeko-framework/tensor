@@ -59,16 +59,18 @@ fn grad_y(n: usize) -> Vec<f32> {
 #[test]
 fn the_forward_is_unchanged_by_the_fix() {
     let c = coef();
-    let (y_mixed, _) = catmull_rom_forward(&c, &mixed_x(), 3, CH, GRID);
+    let (y_mixed, _) =
+        catmull_rom_forward(&c, &mixed_x(), 3, CH, &hymeko_spline::Knots::uniform(GRID));
     assert!(y_mixed.iter().all(|v| v.is_finite()));
 
     // Saturation is still saturation: moving further out changes nothing.
-    let (a, _) = catmull_rom_forward(&c, &[1.5, 1.5], 1, CH, GRID);
-    let (b, _) = catmull_rom_forward(&c, &[2.5, 9.0], 1, CH, GRID);
+    let (a, _) = catmull_rom_forward(&c, &[1.5, 1.5], 1, CH, &hymeko_spline::Knots::uniform(GRID));
+    let (b, _) = catmull_rom_forward(&c, &[2.5, 9.0], 1, CH, &hymeko_spline::Knots::uniform(GRID));
     assert_eq!(bits(&a), bits(&b), "clamped forward must be flat outside");
 
     // And the boundary equals the saturated value, as clamping requires.
-    let (edge, _) = catmull_rom_forward(&c, &[1.0, 1.0], 1, CH, GRID);
+    let (edge, _) =
+        catmull_rom_forward(&c, &[1.0, 1.0], 1, CH, &hymeko_spline::Knots::uniform(GRID));
     assert_eq!(
         bits(&edge),
         bits(&a),
@@ -90,7 +92,7 @@ fn the_forward_is_unchanged_by_the_fix() {
 fn interior_input_gradients_are_present_everywhere() {
     let (c, x) = (coef(), interior_x());
     let gy = grad_y(x.len());
-    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, &hymeko_spline::Knots::uniform(GRID));
     let corrected = catmull_rom_backward(&c, &cache, &gy);
 
     assert!(
@@ -114,7 +116,7 @@ fn interior_input_gradients_are_present_everywhere() {
 fn corrected_zeroes_the_gradient_outside_and_keeps_the_closed_boundary() {
     let (c, x) = (coef(), mixed_x());
     let gy = grad_y(x.len());
-    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, &hymeko_spline::Knots::uniform(GRID));
     let g = catmull_rom_backward(&c, &cache, &gy).grad_x;
 
     for (e, &xv) in x.iter().enumerate() {
@@ -176,7 +178,7 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
     let n = x.len() / CH;
 
     let cr_loss = |xs: &[f32]| -> f64 {
-        catmull_rom_forward(&c, xs, n, CH, GRID)
+        catmull_rom_forward(&c, xs, n, CH, &hymeko_spline::Knots::uniform(GRID))
             .0
             .iter()
             .zip(&gy)
@@ -192,7 +194,7 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
             .sum()
     };
 
-    let (_, cache) = catmull_rom_forward(&c, &x, n, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, n, CH, &hymeko_spline::Knots::uniform(GRID));
     let cr_cor = catmull_rom_backward(&c, &cache, &gy);
     let (_, kc) = kb_forward(&c, &t, &x, n, CH, GRID);
     let kb_cor = kb_backward(&c, &t, &kc, &gy);
@@ -264,7 +266,7 @@ fn the_corrected_kernel_matches_finite_differences_where_legacy_fails() {
 #[test]
 fn the_interior_mask_records_the_raw_input_not_the_clamped_one() {
     let (c, x) = (coef(), mixed_x());
-    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, 3, CH, &hymeko_spline::Knots::uniform(GRID));
     for (e, &xv) in x.iter().enumerate() {
         assert_eq!(
             cache.interior[e],
@@ -300,10 +302,10 @@ fn parameter_gradients_match_finite_differences() {
 
     // ── Catmull-Rom control points ────────────────────────────────────────────────────────────
     let c = coef();
-    let (_, cache) = catmull_rom_forward(&c, &x, n, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, n, CH, &hymeko_spline::Knots::uniform(GRID));
     let analytic = catmull_rom_backward(&c, &cache, &gy).grad_coef;
     let cr_loss = |cs: &[f32]| -> f64 {
-        catmull_rom_forward(cs, &x, n, CH, GRID)
+        catmull_rom_forward(cs, &x, n, CH, &hymeko_spline::Knots::uniform(GRID))
             .0
             .iter()
             .zip(&gy)

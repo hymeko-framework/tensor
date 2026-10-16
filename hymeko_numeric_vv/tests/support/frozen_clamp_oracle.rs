@@ -85,7 +85,13 @@ pub fn cr_legacy_grad_x(
     grid: usize,
     grad_y: &[f32],
 ) -> Vec<f32> {
-    let (_, cache) = catmull_rom_forward(coef, &pre_saturate(x), n, channels, grid);
+    let (_, cache) = catmull_rom_forward(
+        coef,
+        &pre_saturate(x),
+        n,
+        channels,
+        &hymeko_spline::Knots::uniform(grid),
+    );
     catmull_rom_backward(coef, &cache, grad_y).grad_x
 }
 

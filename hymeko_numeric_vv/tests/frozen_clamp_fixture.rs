@@ -60,7 +60,7 @@ fn columns() -> Vec<(&'static str, Vec<f32>)> {
     let (c, t, gy) = (coef(), tcb_raw(), grad_y());
     let x = frozen::saturating_probe(N, CH);
 
-    let (_, cr_cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cr_cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let cr_canonical = catmull_rom_backward(&c, &cr_cache, &gy).grad_x;
 
     let (_, kb_cache) = kb_forward(&c, &t, &x, N, CH, GRID);
@@ -211,7 +211,7 @@ fn the_probe_actually_saturates_on_both_sides_and_hits_both_endpoints() {
 fn frozen_and_canonical_differ_exactly_on_the_saturated_elements() {
     let (c, gy) = (coef(), grad_y());
     let x = frozen::saturating_probe(N, CH);
-    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
     let frozen_gx = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
 
@@ -284,7 +284,7 @@ fn on_a_wholly_interior_input_frozen_and_canonical_agree() {
     let x: Vec<f32> = (0..N * CH)
         .map(|i| -0.9 + 1.8 * (i as f32) / ((N * CH - 1) as f32))
         .collect();
-    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
     let frozen_gx = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
     assert_eq!(
