@@ -1,11 +1,16 @@
 //! The reuse policy itself: [`Pool`] and the two-phase request that lets a deployment allocate
 //! outside whatever guards the pool.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 use super::{AllocationKey, ArenaBackend, ArenaConfig, ArenaEpoch, ArenaStats, ReusePolicy};
 use crate::compute::ComputeError;
+
+type ResourceWithKey<B> = (
+    <B as ArenaBackend>::Resource,
+    AllocationKey<<B as ArenaBackend>::Class>,
+);
 
 /// One allocation the pool holds.
 struct Slab<B: ArenaBackend> {
@@ -90,7 +95,7 @@ pub struct Pool<B: ArenaBackend> {
     /// reuse.
     pending: Vec<(Option<u64>, Slab<B>)>,
     /// Released with a known epoch, waiting for the watermark to reach it.
-    retired: Vec<Slab<B>>,
+    retired: VecDeque<Slab<B>>,
     stats: ArenaStats,
     open_sessions: usize,
     /// The single open session, when exactly one is open.
@@ -115,7 +120,7 @@ impl<B: ArenaBackend> Pool<B> {
             config,
             free: HashMap::new(),
             pending: Vec::new(),
-            retired: Vec::new(),
+            retired: VecDeque::new(),
             stats: ArenaStats::default(),
             open_sessions: 0,
             current_session: None,
@@ -149,12 +154,15 @@ impl<B: ArenaBackend> Pool<B> {
     ) -> Result<AllocationKey<B::Class>, ComputeError> {
         let bytes = match self.config.reuse_policy {
             ReusePolicy::ExactSize | ReusePolicy::BestFit => bytes,
-            ReusePolicy::SizeClass => bytes.checked_next_power_of_two().ok_or(
-                ComputeError::IndexOverflow {
-                    what: "allocation size class exceeds the largest representable power of two",
-                    value: usize::try_from(bytes).unwrap_or(usize::MAX),
-                },
-            )?,
+            ReusePolicy::SizeClass => {
+                bytes
+                    .checked_next_power_of_two()
+                    .ok_or(ComputeError::IndexOverflow {
+                        what:
+                            "allocation size class exceeds the largest representable power of two",
+                        value: usize::try_from(bytes).unwrap_or(usize::MAX),
+                    })?
+            }
         };
         Ok(AllocationKey { bytes, class })
     }
@@ -209,11 +217,7 @@ impl<B: ArenaBackend> Pool<B> {
     ///
     /// The resource holds at least the requested bytes, checked in debug builds: a backend whose
     /// `create` or `grow` gives less is at fault.
-    pub fn admit(
-        &mut self,
-        backend: &B,
-        allocation: Allocation<B>,
-    ) -> (B::Resource, AllocationKey<B::Class>) {
+    pub fn admit(&mut self, backend: &B, allocation: Allocation<B>) -> ResourceWithKey<B> {
         let bytes = backend.bytes(&allocation.resource);
         debug_assert!(
             bytes >= allocation.want,
@@ -260,7 +264,7 @@ impl<B: ArenaBackend> Pool<B> {
         backend: &B,
         bytes: u64,
         class: B::Class,
-    ) -> Result<(B::Resource, AllocationKey<B::Class>), ComputeError> {
+    ) -> Result<ResourceWithKey<B>, ComputeError> {
         let allocation = self.request(bytes, class)?.allocate(backend);
         Ok(self.admit(backend, allocation))
     }
@@ -290,23 +294,47 @@ impl<B: ArenaBackend> Pool<B> {
             self.pending.push((self.current_session, slab));
         } else {
             slab.safe_after = latest_issued;
-            self.retired.push(slab);
+            self.retired.push_back(slab);
         }
         self.note_peak();
     }
 
     /// Move retired allocations whose epoch has completed onto the free list.
     pub fn reclaim_completed(&mut self, watermark: B::Epoch) {
-        let mut i = 0;
-        while i < self.retired.len() {
-            if self.retired[i].safe_after.is_complete_at(watermark) {
-                let slab = self.retired.swap_remove(i);
+        self.reclaim_completed_budgeted(watermark, usize::MAX);
+    }
+
+    /// Check at most `max_checks` retired allocations and return the number reclaimed.
+    ///
+    /// Incomplete epochs rotate to the back, so repeated bounded calls do not
+    /// starve ready resources behind them. Each allocation is checked at most
+    /// once per call. Zero budget changes nothing. Pending sessions are untouched.
+    ///
+    /// The budget bounds epoch checks, not elapsed time: free-list insertion,
+    /// eviction and backend destruction retain their existing costs and may
+    /// allocate. Existing cache byte/buffer limits still apply to every insertion.
+    ///
+    /// # Postconditions
+    ///
+    /// Only completed resources leave retirement, and all byte/state counters
+    /// remain exact. A reclaimed resource may be evicted instead of cached.
+    pub fn reclaim_completed_budgeted(&mut self, watermark: B::Epoch, max_checks: usize) -> usize {
+        let mut reclaimed = 0;
+        for _ in 0..max_checks.min(self.retired.len()) {
+            // The initial length bounds the loop; every non-reclaimed slab is
+            // put back, so this branch cannot exhaust the queue prematurely.
+            let Some(slab) = self.retired.pop_front() else {
+                break;
+            };
+            if slab.safe_after.is_complete_at(watermark) {
                 self.stats.in_flight_bytes -= slab.bytes;
                 self.push_free(slab);
+                reclaimed += 1;
             } else {
-                i += 1;
+                self.retired.push_back(slab);
             }
         }
+        reclaimed
     }
 
     /// Drop every cached allocation. Leased and in-flight ones are not the pool's to free.
@@ -336,7 +364,7 @@ impl<B: ArenaBackend> Pool<B> {
         self.close_session();
         for (_owner, mut slab) in self.pending.drain(..) {
             slab.safe_after = epoch;
-            self.retired.push(slab);
+            self.retired.push_back(slab);
         }
     }
 
@@ -346,7 +374,7 @@ impl<B: ArenaBackend> Pool<B> {
         self.close_session();
         for (_owner, mut slab) in self.pending.drain(..) {
             slab.safe_after = B::Epoch::NEVER;
-            self.retired.push(slab);
+            self.retired.push_back(slab);
         }
     }
 
@@ -365,7 +393,7 @@ impl<B: ArenaBackend> Pool<B> {
         session: u64,
         bytes: u64,
         class: B::Class,
-    ) -> Result<Option<(B::Resource, AllocationKey<B::Class>)>, ComputeError> {
+    ) -> Result<Option<ResourceWithKey<B>>, ComputeError> {
         let key = self.key_for(bytes, class)?;
         let found = self.pending.iter().position(|(owner, slab)| {
             *owner == Some(session) && slab.class == class && slab.bytes >= key.bytes

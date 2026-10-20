@@ -12,7 +12,9 @@
 //! Core owns canonical-IR adapters; Nagare owns graph-aware transformations
 //! and neural-network layers. Neither is a dependency of this crate.
 
+pub mod contraction;
 pub mod linalg;
+pub mod operator;
 pub mod renyi;
 pub mod stream;
 
