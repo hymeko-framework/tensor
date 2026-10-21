@@ -1,39 +1,66 @@
-# tensor — HyMeKo Tensor pillar
+# tensor - HyMeKo numerical foundations
 
-The mathematical foundation and streamed representation of the HyMeKo **Tensor** pillar, as a standalone Cargo
-workspace.
+Tensor owns numerical storage, kernels and arithmetic contracts shared by the
+HyMeKo framework. Core owns the canonical semantic IR; Graph owns graph algorithms.
+This workspace contains no second graph implementation or semantic IR.
 
 ## Crates
 
-- **`hymeko_tensor`** — matrix-based Rényi-α=2 information estimators (`renyi`: Gram, `S₂` entropy, mutual
-  information + gradient, Chebyshev features, stable rank) and the streamed HyMeKo IR format (`stream`:
-  `HyMeKoStream` = `{dims, single flat arena, cheby_order}` with a bit-exact encode/decode round-trip). Pure,
-  `std`-only, no dependencies.
-- **`hymeko_clifford`** — Clifford / geometric-algebra foundation: dense `Multivector<N>`, signature, blade product,
-  `Rotor`. `std`-only.
-- **`hymeko_graph`** — signed-incidence hypergraph algorithms (the native hyperconv substrate).
+| Crate | Responsibility |
+|---|---|
+| `hymeko_tensor` | Tensor/CSR storage, numerical kernels, host compute arenas, information estimators, virtual row operators and contraction planning |
+| `hymeko_clifford` | Clifford algebra, rotors and rigid-motion primitives |
+| `hymeko_spline` | Spline kernels, including Catmull-Rom and NURBS |
+| `hymeko_numerics` | Matrix-free iterative solvers and port-Hamiltonian numerical contracts |
+| `hymeko_vision` | Vision primitives |
+| `hymeko_numeric_vv` | Downstream numerical verification with independent/frozen oracles |
+| `hymeko_tensor_py` | Optional Python bindings to Tensor-owned functionality |
 
-## Provenance
+## Virtual operators and bounded planning
 
-Extracted 2026-08-16 from `nagare` (`feat/auto-holonomy-arc`, examples/nagare_deep_signed.rs): the matrix-Rényi
-estimators and the streamed IR (`HyMeKoStream`) developed in the information-theoretic arc; `hymeko_clifford` /
-`hymeko_graph` mirrored from the framework. The Nagare learner still carries its own copies pending a rewire to
-depend on this workspace.
+`operator` provides ordered sparse-row gather/scatter, independent accumulator
+policies and range contractions without materializing a matrix product. Caller-owned
+workspaces retain storage across calls. `contraction` provides bounded branch-and-bound
+planning and sparse matrix-chain execution; reassociation is explicit because it
+can change floating-point results. Shannon entropy is an ordering descriptor, not
+a certified pruning bound.
+
+`Pool::reclaim_completed_budgeted(watermark, max_checks)` inspects at most the stated
+number of retired resources. Incomplete epochs rotate behind the others and open
+sessions stay protected. The limit bounds epoch checks; allocation, eviction and
+backend destruction retain their own costs.
+
+## Validation and results
+
+The October 2026 release preparation passed **52 focused correctness tests**:
+33 compute-arena, 7 contraction-planning, 4 sparse matrix-chain and 8 virtual-operator
+tests. They cover invalid inputs, independent numerical references, ordering,
+buffer reuse and bounded reclamation. Run them with:
+
+```sh
+cargo test -p hymeko_tensor --features sparse --test compute_arena --test contraction_planning --test matrix_chain --test virtual_operators
+```
+
+The virtual operators are used by Core incidence projections and Graph PageRank.
+[Graph's retained performance evidence](https://github.com/hymeko-framework/graph/tree/main/docs/evidence/graph-algorithms)
+reports complete graph operations on explicit workloads. Those results are not
+standalone Tensor-kernel timings. No speedup is inferred from refactoring alone.
 
 ## Build
 
-The existing compute arena supports
-`Pool::reclaim_completed_budgeted(watermark, max_checks)`. Each call inspects at
-most `max_checks` retired resources; incomplete epochs rotate behind the others.
-Pending sessions remain protected and cache byte/buffer budgets still apply.
-The return value counts completed resources removed from retirement, including
-ones evicted instead of cached. The original `reclaim_completed` checks all
-currently retired resources through the same implementation. The budget bounds
-epoch checks; free-list eviction, allocation and backend destruction retain
-their existing costs. Reclamation visits resources in FIFO rotation order.
+```sh
+cargo build -p hymeko_tensor --features sparse
+```
 
-```
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
-```
+Default Tensor features are empty. Sparse parallel kernels, interop and Arrow
+support are explicit features; Python bindings are a separate crate. Criterion
+benchmarks require explicit `cargo bench` invocation and are not the correctness
+commands above. The workspace does not track Cargo.lock; retain the resolved lock
+and toolchain when reproducing an experiment.
+
+## Provenance and license
+
+The repositories were split from the earlier HyMeKo workspace. Tensor received
+Core's generic numerical storage and compute-arena contracts in September 2026.
+Use the current owning repositories rather than historical copied implementations.
+See [LICENSE](LICENSE) and individual crate metadata for licensing declarations.
