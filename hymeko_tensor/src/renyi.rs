@@ -1,6 +1,6 @@
-//! Matrix-based Rényi-α=2 information estimators (Giraldo, Rao & Principe 2015) on minibatch Gram matrices.
+//! Matrix-based Rényi-α=2 estimators and count-based Shannon summaries.
 //!
-//! All quantities are computed from **traces only** (no eigendecomposition, no density estimation), which is what
+//! Rényi quantities (Giraldo, Rao & Principe 2015) use **traces only** (no eigendecomposition, no density estimation), which is what
 //! makes them affordable as a per-step signal. The order-2 case uses `tr(K²) = Σ K_ij²`. These are pure,
 //! `std`-only functions on flat row-major slices; they carry no notion of a network — the caller supplies the
 //! activation matrix `A` (flat `m×d`) and, where relevant, a precomputed label/other Gram `K_Y` (flat `m×m`).
@@ -188,6 +188,39 @@ pub fn stable_rank(a: &[f32], d: usize) -> f32 {
     }
     let lam: f32 = (0..d).map(|i| v[i] * gv[i]).sum::<f32>().max(1e-12);
     (frob2 / lam).clamp(1.0, d as f32)
+}
+
+/// Shannon entropy of a nonnegative count distribution, in bits.
+///
+/// This descriptor is an ordering heuristic, not a certified search bound.
+/// Zero counts contribute nothing; empty distributions have entropy zero.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShannonEntropy {
+    total: f64,
+    weighted_log: f64,
+}
+impl ShannonEntropy {
+    /// Summarize counts without retaining or normalizing an input vector.
+    pub fn from_counts(counts: impl IntoIterator<Item = usize>) -> Self {
+        counts
+            .into_iter()
+            .filter(|&n| n != 0)
+            .fold(Self::default(), |mut state, n| {
+                let n = n as f64;
+                state.total += n;
+                state.weighted_log += n * n.log2();
+                state
+            })
+    }
+    /// `log2(total) - sum(count * log2(count))/total`, clamped at zero
+    /// against cancellation. This does not certify a pruning inequality.
+    pub fn bits(self) -> f64 {
+        if self.total == 0.0 {
+            0.0
+        } else {
+            (self.total.log2() - self.weighted_log / self.total).max(0.0)
+        }
+    }
 }
 
 #[cfg(test)]

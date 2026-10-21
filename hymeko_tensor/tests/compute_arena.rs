@@ -4,11 +4,11 @@
 
 use std::cell::Cell;
 
-use hymeko_tensor::compute::ComputeError;
 use hymeko_tensor::compute::arena::{
     AllocationKey, ArenaBackend, ArenaConfig, ArenaEpoch, ArenaStats, HostArena, HostResource,
     Pool, ReusePolicy,
 };
+use hymeko_tensor::compute::ComputeError;
 
 /// A device whose allocations are numbered in creation order, sized exactly, and classed by a
 /// small tag. `GROWS` selects whether it can grow an allocation in place.
@@ -27,10 +27,13 @@ struct Buffer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Epoch(u64);
 
+thread_local! { static EPOCH_CHECKS: Cell<usize> = const { Cell::new(0) }; }
+
 impl ArenaEpoch for Epoch {
     const NEVER: Self = Self(0);
 
     fn is_complete_at(self, watermark: Self) -> bool {
+        EPOCH_CHECKS.with(|count| count.set(count.get() + 1));
         self.0 <= watermark.0
     }
 }
@@ -161,6 +164,57 @@ fn a_retired_allocation_is_reused_only_once_its_epoch_completes() {
     rig.pool.reclaim_completed(Epoch(3));
     assert_eq!(rig.stats().cached_buffers, 1);
     assert_eq!(rig.take(256, 0).0.id, 1);
+}
+
+#[test]
+fn bounded_reclamation_rotates_past_incomplete_epochs_without_starvation() {
+    let mut rig = Fixed::new(ReusePolicy::ExactSize);
+    for (bytes, epoch) in [(64, 9), (128, 8), (256, 1)] {
+        let lease = rig.take(bytes, 0);
+        rig.release(lease, Epoch(epoch));
+    }
+    EPOCH_CHECKS.with(|n| n.set(0));
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), 0), 0);
+    assert_eq!(EPOCH_CHECKS.with(Cell::get), 0);
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), 1), 0);
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), 1), 0);
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), 1), 1);
+    assert_eq!(EPOCH_CHECKS.with(Cell::get), 3);
+    assert_eq!(rig.stats().in_flight_bytes, 192);
+    assert_eq!(rig.stats().cached_bytes, 256);
+    assert_eq!(rig.take(256, 0).0.id, 3);
+    EPOCH_CHECKS.with(|n| n.set(0));
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), usize::MAX), 0);
+    assert_eq!(EPOCH_CHECKS.with(Cell::get), 2, "each entry at most once");
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(9), usize::MAX), 2);
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(9), 1), 0);
+    assert_eq!(rig.stats().in_flight_bytes, 0);
+    assert_states_sum(rig.stats());
+}
+
+#[test]
+fn bounded_reclamation_preserves_pending_sessions_and_cache_budgets() {
+    let mut rig = Fixed::with(budget(64, 1));
+    let ready = rig.take(32, 0);
+    let too_large = rig.take(128, 0);
+    let pending = rig.take(64, 0);
+    rig.release(ready, Epoch(1));
+    rig.release(too_large, Epoch(1));
+    rig.pool.open_session();
+    rig.release(pending, Epoch(1));
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), 1), 1);
+    assert_eq!(rig.stats().cached_bytes, 32);
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(1), 1), 1);
+    assert_eq!(rig.stats().evictions, 2, "existing eviction policy applies");
+    assert_eq!(rig.stats().cached_buffers, 0);
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(9), 10), 0);
+    assert_eq!(rig.stats().in_flight_bytes, 64, "pending is not retired");
+    rig.pool.submit_session(Epoch(12));
+    assert_eq!(rig.pool.reclaim_completed_budgeted(Epoch(11), 1), 0);
+    rig.pool.reclaim_completed(Epoch(12));
+    assert_eq!(rig.stats().cached_bytes, 64);
+    assert_eq!(rig.stats().in_flight_bytes, 0);
+    assert_states_sum(rig.stats());
 }
 
 #[test]

@@ -22,6 +22,16 @@ depend on this workspace.
 
 ## Build
 
+The existing compute arena supports
+`Pool::reclaim_completed_budgeted(watermark, max_checks)`. Each call inspects at
+most `max_checks` retired resources; incomplete epochs rotate behind the others.
+Pending sessions remain protected and cache byte/buffer budgets still apply.
+The return value counts completed resources removed from retirement, including
+ones evicted instead of cached. The original `reclaim_completed` checks all
+currently retired resources through the same implementation. The budget bounds
+epoch checks; free-list eviction, allocation and backend destruction retain
+their existing costs. Reclamation visits resources in FIFO rotation order.
+
 ```
 cargo build
 cargo test

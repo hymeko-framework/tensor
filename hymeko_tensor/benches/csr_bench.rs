@@ -22,10 +22,101 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput};
 
+use hymeko_tensor::contraction::MatrixChain;
 use hymeko_tensor::representations::tensor_csr::TensorCsr;
 use hymeko_tensor::sparse_workload::{DegreeShape, SparseSpec};
+#[path = "../tests/chain_common/mod.rs"]
+mod chain_common;
+
+fn bench_contraction_chain(c: &mut Criterion, optimized_first: bool) {
+    use chain_common::ChainCase;
+    let mut group = c.benchmark_group("contraction_chain");
+    group
+        .sample_size(30)
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_secs(1));
+    for (label, scale, degree_divisor) in [("small", 1, 1), ("large", 8, 1), ("sparse", 8, 8)] {
+        let matrices = ChainCase {
+            scale,
+            degree_divisor,
+        }
+        .build();
+        let chain = MatrixChain::new(&matrices).unwrap();
+        let a = chain.plan(ChainCase::budget(0)).unwrap().plan.unwrap();
+        let outcome = chain.plan(ChainCase::budget(200_000)).unwrap();
+        assert!(outcome.complete);
+        let b = outcome.plan.unwrap();
+        let reference = chain.prepare(&a).unwrap().execute().to_vec();
+        let mut verify = chain.prepare(&b).unwrap();
+        let result = verify.execute();
+        assert!(reference.iter().chain(result.iter()).all(|v| v.is_finite()));
+        let norm = reference.iter().copied().fold(0.0, f64::max).max(1.0);
+        let relative = reference
+            .iter()
+            .zip(result)
+            .map(|(x, y)| (x - y).abs() / norm)
+            .fold(0.0, f64::max);
+        assert!(relative <= 1e-12);
+        println!(
+            "CHAIN_INPUT {label} dims={:?} nnz={:?} blake3={} relative_error={relative:e}",
+            matrices
+                .iter()
+                .map(|m| (m.num_rows, m.num_cols))
+                .collect::<Vec<_>>(),
+            matrices.iter().map(|m| m.val.len()).collect::<Vec<_>>(),
+            ChainCase::fingerprint(&matrices)
+        );
+        let mut plans = [("greedy", 0, &a), ("optimized", 200_000, &b)];
+        if optimized_first {
+            plans.reverse();
+        }
+        for (name, states, plan) in plans {
+            let mut prepared = chain.prepare(plan).unwrap();
+            println!(
+                "CHAIN_PLAN {label} {name} work={} retained_bytes={}",
+                plan.work(),
+                prepared.retained_bytes()
+            );
+            group.bench_function(
+                BenchmarkId::new("plan", format!("{label}-{name}")),
+                |bench| {
+                    bench.iter(|| {
+                        black_box(chain.plan(black_box(ChainCase::budget(states))).unwrap())
+                    })
+                },
+            );
+            group.bench_function(
+                BenchmarkId::new("prepare", format!("{label}-{name}")),
+                |bench| bench.iter(|| black_box(chain.prepare(black_box(plan)).unwrap())),
+            );
+            group.bench_function(
+                BenchmarkId::new("execute", format!("{label}-{name}")),
+                |bench| {
+                    bench.iter(|| {
+                        black_box(prepared.execute());
+                    })
+                },
+            );
+            group.bench_function(
+                BenchmarkId::new("once", format!("{label}-{name}")),
+                |bench| {
+                    bench.iter(|| {
+                        let plan = chain
+                            .plan(black_box(ChainCase::budget(states)))
+                            .unwrap()
+                            .plan
+                            .unwrap();
+                        let mut execution = chain.prepare(&plan).unwrap();
+                        black_box(execution.execute());
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
 
 /// The three measured scales, with a label used in benchmark ids.
 fn scales() -> [(&'static str, SparseSpec); 3] {
@@ -232,12 +323,27 @@ fn bench_alloc_overhead(c: &mut Criterion) {
 
     group.finish();
 }
-criterion_group!(
-    benches,
-    bench_spmv,
-    bench_spmm,
-    bench_spmv_paths,
-    bench_spmm_paths,
-    bench_alloc_overhead
-);
-criterion_main!(benches);
+fn main() {
+    let mut criterion = Criterion::default().configure_from_args();
+    // Select at the binary boundary: Criterion's function-name filter does not
+    // skip fixture construction in other registered groups. Keep RSS attributable.
+    if std::env::var("HYMEKO_CONTRACTION_BENCH").as_deref() == Ok("1") {
+        let optimized_first = match std::env::var("HYMEKO_PLAN_ORDER").as_deref() {
+            Ok("optimized-first") => true,
+            Ok("greedy-first") | Err(_) => false,
+            Ok(_) => panic!("HYMEKO_PLAN_ORDER must be greedy-first or optimized-first"),
+        };
+        bench_contraction_chain(&mut criterion, optimized_first);
+    } else {
+        for benchmark in [
+            bench_spmv,
+            bench_spmm,
+            bench_spmv_paths,
+            bench_spmm_paths,
+            bench_alloc_overhead,
+        ] {
+            benchmark(&mut criterion);
+        }
+    }
+    criterion.final_summary();
+}
