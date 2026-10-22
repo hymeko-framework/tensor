@@ -5,13 +5,7 @@
 //! so routing through a `2^n` multivector would add the wrong abstraction and
 //! unnecessary storage.
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
+use super::vector::cross;
 
 /// Cayley map from Rodrigues parameters to a unit quaternion `[w, x, y, z]`.
 ///

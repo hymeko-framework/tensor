@@ -37,7 +37,7 @@ pub use algebra::{
     ArticulatedInertia, Dim2, Dim3, EuclideanDim, Multivector, Se, Se2, Se3, SeFixed, Signature,
     SpatialInertia, TreeStep, Twist, Wrench, blade_product, canonical_reorder_sign,
     cayley_rotor_backward, cayley_rotor_forward, cayley_to_unit_quat, closed_form_curvature,
-    cotree_residuals, curvature_energy, q_at, quat_conjugate, quat_mul, quat_rotate, rotor_angle,
-    rotor_holonomy_backward, rotor_holonomy_forward, tree_gauge_frames,
+    cotree_residuals, cross, curvature_energy, q_at, quat_conjugate, quat_mul, quat_rotate,
+    rotor_angle, rotor_holonomy_backward, rotor_holonomy_forward, tree_gauge_frames,
 };
 pub use autodiff::{Adjoint, Backend, ChainError, RotorChain};

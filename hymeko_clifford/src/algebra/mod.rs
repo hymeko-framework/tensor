@@ -18,6 +18,7 @@ mod se;
 mod se_fixed;
 mod signature;
 mod spatial;
+mod vector;
 
 pub use blade::{blade_product, canonical_reorder_sign};
 pub use connection::{
@@ -33,3 +34,4 @@ pub use se::Se;
 pub use se_fixed::{Dim2, Dim3, EuclideanDim, Se2, Se3, SeFixed};
 pub use signature::Signature;
 pub use spatial::{ArticulatedInertia, SpatialInertia, Twist, Wrench};
+pub use vector::cross;
