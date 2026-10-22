@@ -252,47 +252,48 @@ pub struct ChebyshevCrBackward {
     pub grad_coef: Vec<f32>,
 }
 
-/// The per-element buffers [`catmull_rom_forward`] fills for a block of rows.
+/// The per-element buffers a forward fills for a block of rows: each bank's output, and the one tape.
 ///
 /// Bundled into a struct so the shared row kernel takes four arguments instead of
 /// seven (§6.5 #6) and so the sequential and parallel paths call *one*
 /// implementation rather than each carrying a copy of the arithmetic (§6.1).
-struct ForwardRow<'a> {
-    out: &'a mut [f32],
+struct ForwardRow<'a, 'b> {
+    /// Each bank's output slice over the block.
+    outs: &'b mut [&'a mut [f32]],
     x_clamped: &'a mut [f32],
     interior: &'a mut [bool],
 }
 
-/// Evaluate the CR spline for every element of a whole block of rows.
+/// Evaluate every bank's CR spline for every element of a whole block of rows.
 ///
 /// One pass over runs of elements in row-major order, the channel a counter that wraps (not
 /// `element % channels`, which measured ~24 % slower): no per-row iterator setup, which at one
 /// channel cost as much as the arithmetic. Each run is two passes: the clamp, the segment and the
-/// weights of every element at once, then the control values by channel and segment.
+/// weights of every element at once, then, bank by bank, the control values by channel and segment.
+/// The first pass is the banks' one (tensor plan 2026-10-22-cr-banks): banks over one input share
+/// their segments and weights, and write one tape.
 ///
 /// # Preconditions
 /// Every slice in `w` has the same length as `x_block`, which is a whole multiple
-/// of `channels`; `coef.len() == channels * grid`; `grid >= 3`.
+/// of `channels`; one output per bank in `banks`; each bank's table over `channels × knots.len()`
+/// coefficients.
 #[inline(always)]
 fn forward_block<const UNIFORM: bool>(
-    segments: &Segments,
+    banks: &[Segments],
     knots: &Knots,
     channels: usize,
     x_block: &[f32],
-    w: ForwardRow<'_>,
+    w: ForwardRow<'_, '_>,
 ) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
+    debug_assert_eq!(banks.len(), w.outs.len(), "one output per bank");
     let (span, last) = (0.5 * (knots.grid() - 1) as f32, (knots.grid() - 2) as f32);
     let mut pass = ElementPass::new();
     let mut ch = 0;
-    let runs = w
-        .out
-        .chunks_mut(RUN)
-        .zip(w.x_clamped.chunks_mut(RUN))
-        .zip(w.interior.chunks_mut(RUN))
-        .zip(x_block.chunks(RUN));
-    for (((out, x_clamped), interior), x) in runs {
-        let n = x.len();
+    for start in (0..x_block.len()).step_by(RUN) {
+        let end = (start + RUN).min(x_block.len());
+        let n = end - start;
+        let x = &x_block[start..end];
         let ElementPass {
             segment: seg,
             weights: [w0, w1, w2, w3],
@@ -305,7 +306,7 @@ fn forward_block<const UNIFORM: bool>(
             &mut w2[..n],
             &mut w3[..n],
         );
-        let (out, x_clamped, interior) = (&mut out[..n], &mut x_clamped[..n], &mut interior[..n]);
+        let (x_clamped, interior) = (&mut w.x_clamped[start..end], &mut w.interior[start..end]);
         // First pass, every element of the run at once: the clamp, the segment and the weights.
         for e in 0..n {
             let raw = x[e];
@@ -323,13 +324,18 @@ fn forward_block<const UNIFORM: bool>(
             // Closed interval: `±1` is interior, matching the guard this replaces.
             interior[e] = (-1.0..=1.0).contains(&raw);
         }
-        // Second pass: each element's four control values, by its channel and segment.
-        for e in 0..n {
-            let c = segments.quad(ch, seg[e] as usize);
-            out[e] = w0[e] * c[0] + w1[e] * c[1] + w2[e] * c[2] + w3[e] * c[3];
-            ch += 1;
-            if ch == channels {
-                ch = 0;
+        // Second pass, bank by bank: each element's four control values, by its channel and segment.
+        let first = ch;
+        for (segments, out) in banks.iter().zip(w.outs.iter_mut()) {
+            let out = &mut out[start..end];
+            ch = first;
+            for e in 0..n {
+                let c = segments.quad(ch, seg[e] as usize);
+                out[e] = w0[e] * c[0] + w1[e] * c[1] + w2[e] * c[2] + w3[e] * c[3];
+                ch += 1;
+                if ch == channels {
+                    ch = 0;
+                }
             }
         }
     }
@@ -339,16 +345,16 @@ fn forward_block<const UNIFORM: bool>(
 /// which vectorises; refined ones locate their leaves. One choice per call, never per element.
 #[inline(always)]
 fn forward_block_over(
-    segments: &Segments,
+    banks: &[Segments],
     knots: &Knots,
     channels: usize,
     x_block: &[f32],
-    w: ForwardRow<'_>,
+    w: ForwardRow<'_, '_>,
 ) {
     if knots.is_uniform() {
-        forward_block::<true>(segments, knots, channels, x_block, w);
+        forward_block::<true>(banks, knots, channels, x_block, w);
     } else {
-        forward_block::<false>(segments, knots, channels, x_block, w);
+        forward_block::<false>(banks, knots, channels, x_block, w);
     }
 }
 
@@ -408,14 +414,55 @@ pub fn catmull_rom_forward_into(
     into: CatmullRomBuffers<'_>,
 ) {
     let CatmullRomBuffers { out, cache } = into;
+    let banks = CatmullRomBanksBuffers {
+        outs: vec![out],
+        cache,
+    };
+    catmull_rom_banks_forward_into(&[coef], x, n, channels, knots, banks);
+}
+
+/// The buffers a forward of several banks writes, owned by the caller: one output per bank, each flat
+/// `(n, channels)`, and the one tape the banks share.
+#[derive(Debug)]
+pub struct CatmullRomBanksBuffers<'a> {
+    /// One output per bank, flat `(n, channels)`; every element is written.
+    pub outs: Vec<&'a mut [f32]>,
+    /// Refilled in place for the call's shape; its buffers keep their capacity.
+    pub cache: &'a mut CatmullRomCache,
+}
+
+/// Several banks of control points over one input (tensor plan 2026-10-22-cr-banks): bank `b`'s output
+/// is [`catmull_rom_forward`] of `coefs[b]`, and the clamp, the segment and the weights of every element
+/// are computed once for all of them, into one tape.
+///
+/// # Preconditions
+/// At least one bank; every `coefs[b].len() == channels * knots.len()`; one output per bank, each
+/// `n * channels`; `x.len() == n * channels`.
+///
+/// # Postconditions
+/// Each `into.outs[b]` is bit for bit [`catmull_rom_forward`]'s output for `coefs[b]`, and `into.cache`
+/// its cache (the same for every bank).
+pub fn catmull_rom_banks_forward_into(
+    coefs: &[&[f32]],
+    x: &[f32],
+    n: usize,
+    channels: usize,
+    knots: &Knots,
+    into: CatmullRomBanksBuffers<'_>,
+) {
+    let CatmullRomBanksBuffers { mut outs, cache } = into;
     // Three is the smallest grid this operator **supports**: `i` ranges over `{0, 1}`, giving two
     // segments, and the outer stencil points are supplied by the endpoint replication
     // `cr_control_indices` already performs. The CogInfoCom HSiKAN configuration uses grid 3, which
     // is why the minimum moved from 4. Grid 2 is out of contract here — not asserted to be
     // mathematically impossible, simply not a configuration this operator is certified for.
+    assert!(!coefs.is_empty(), "at least one bank");
     assert_eq!(x.len(), n * channels);
-    assert_eq!(coef.len(), channels * knots.len());
-    assert_eq!(out.len(), x.len(), "out must be (n, channels)");
+    assert_eq!(outs.len(), coefs.len(), "one output per bank");
+    for (coef, out) in coefs.iter().zip(&outs) {
+        assert_eq!(coef.len(), channels * knots.len());
+        assert_eq!(out.len(), x.len(), "out must be (n, channels)");
+    }
 
     // Refilled, not rebuilt: `resize` keeps the capacity, and the blocks below overwrite every
     // element, so nothing a previous call left is read.
@@ -426,7 +473,10 @@ pub fn catmull_rom_forward_into(
     cache.grid = knots.len();
     cache.knots = Some(knots.clone());
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let segments = Segments::of(coef, channels, knots);
+    let banks: Vec<Segments> = coefs
+        .iter()
+        .map(|coef| Segments::of(coef, channels, knots))
+        .collect();
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
     // parallel result is bit-identical to the sequential one at any thread count.
@@ -434,60 +484,49 @@ pub fn catmull_rom_forward_into(
     #[cfg(feature = "parallel")]
     if use_parallel(x.len()) {
         let stride = block_stride(n, channels);
-        out.par_chunks_mut(stride)
+        // Every bank's slice of each block, block-major in one buffer: a block takes its banks'
+        // slices as one chunk of it, and nothing is allocated per block.
+        let bank_count = outs.len();
+        let mut by_bank: Vec<_> = outs.into_iter().map(|out| out.chunks_mut(stride)).collect();
+        let mut by_block: Vec<&mut [f32]> =
+            Vec::with_capacity(x.len().div_ceil(stride) * bank_count);
+        while let Some(first) = by_bank[0].next() {
+            by_block.push(first);
+            by_block.extend(by_bank[1..].iter_mut().filter_map(Iterator::next));
+        }
+        by_block
+            .par_chunks_mut(bank_count)
             .zip(x_clamped.par_chunks_mut(stride))
             .zip(interior.par_chunks_mut(stride))
             .zip(x.par_chunks(stride))
-            .for_each(|(((out_b, xc_b), in_b), x_b)| {
+            .for_each(|(((outs, xc_b), in_b), x_b)| {
                 forward_block_over(
-                    &segments,
+                    &banks,
                     knots,
                     channels,
                     x_b,
                     ForwardRow {
-                        out: out_b,
+                        outs,
                         x_clamped: xc_b,
                         interior: in_b,
                     },
                 );
             });
-    } else {
-        forward_block_over(
-            &segments,
-            knots,
-            channels,
-            x,
-            ForwardRow {
-                out,
-                x_clamped,
-                interior,
-            },
-        );
+        return;
     }
 
-    #[cfg(not(feature = "parallel"))]
     forward_block_over(
-        &segments,
+        &banks,
         knots,
         channels,
         x,
         ForwardRow {
-            out,
+            outs: &mut outs,
             x_clamped,
             interior,
         },
     );
 }
-
-/// One block's slices as the five-way zip yields them.
-///
-/// Named so the sequential and parallel branches can share a single closure: both
-/// `chunks_mut` and `par_chunks_mut` produce this same nesting, and the shared
-/// closure is what guarantees the two paths run identical arithmetic.
-type BackwardZip<'a> = (
-    (((&'a mut [f32], &'a [f32]), &'a [f32]), &'a [bool]),
-    &'a mut [f32],
-);
 
 /// One chunk's view of the backward's per-element inputs and outputs.
 ///
@@ -496,58 +535,126 @@ type BackwardZip<'a> = (
 /// parameter list that stays under the §6.5 #6 limit.
 struct BackwardChunk<'a> {
     grad_x: &'a mut [f32],
-    grad_y: &'a [f32],
+    /// Each bank's whole output cotangent; the chunk reads it from `offset`.
+    grad_ys: &'a [&'a [f32]],
+    /// The chunk's first element in the cotangents.
+    offset: usize,
     /// Clamped inputs from the forward; the segment is recomputed from them ([`segment`]).
     x_clamped: &'a [f32],
     /// Per-element interior mask from the forward; see [`CatmullRomCache::interior`].
     interior: &'a [bool],
 }
 
-/// Accumulate one contiguous chunk of rows into `grad_x` and `grad_coef`.
+/// One bank over one run of the backward: its table, its cotangent over the run, the run's interior mask
+/// and first pass, and the bank's accumulators.
+struct BankRun<'a> {
+    segments: &'a Segments,
+    grad_y: &'a [f32],
+    interior: &'a [bool],
+    pass: &'a ElementPass,
+    accumulators: &'a mut [[f32; 4]],
+}
+
+impl BankRun<'_> {
+    /// The bank's second pass over the run: each element's `gy · w` into its channel's and segment's
+    /// accumulator, and its input-gradient term written (`ASSIGN`) or added into `grad_x`. Returns the
+    /// channel counter after the run.
+    #[inline(always)]
+    fn pull<const UNIFORM: bool, const ASSIGN: bool>(
+        self,
+        grad_x: &mut [f32],
+        (mut ch, channels, segs): (usize, usize, usize),
+        du_dx: f32,
+    ) -> usize {
+        let ElementPass {
+            segment: seg,
+            weights,
+            dweights,
+            scale,
+        } = self.pass;
+        for (e, (gx, &gy)) in grad_x.iter_mut().zip(self.grad_y).enumerate() {
+            // The element's channel and segment: its accumulator and its control values.
+            let at = ch * segs + seg[e] as usize;
+            let slots = &mut self.accumulators[at];
+            for k in 0..4 {
+                slots[k] += gy * weights[k][e];
+            }
+            // The input gradient as before: the clamp's own Jacobian is `1` inside the closed
+            // interval, `0` outside, read from the recorded `interior` mask (not from `x_clamped`,
+            // which is inside by construction).
+            let term = if self.interior[e] {
+                let c = self.segments.quads[at];
+                let mut dy_dt = 0.0;
+                for k in 0..4 {
+                    dy_dt += dweights[k][e] * c[k];
+                }
+                // A leaf at depth `d` is `2^d` times narrower in `u`: `dt/dx = span · 2^d`.
+                if UNIFORM {
+                    gy * dy_dt * du_dx
+                } else {
+                    gy * dy_dt * (du_dx * scale[e])
+                }
+            } else {
+                0.0
+            };
+            if ASSIGN {
+                *gx = term;
+            } else {
+                *gx += term;
+            }
+            ch += 1;
+            if ch == channels {
+                ch = 0;
+            }
+        }
+        ch
+    }
+}
+
+/// Accumulate one contiguous chunk of rows into `grad_x` and each bank's coefficient gradient.
 ///
 /// # Preconditions
 /// Every slice in `c` has the same length, a multiple of `channels`, and the chunk
-/// starts on a row boundary — otherwise the `element % channels` channel index is
-/// wrong. `grad_coef.len() == channels * grid`.
+/// starts on a row boundary — otherwise the channel counter is wrong. One cotangent per bank;
+/// `grad_coefs` holds the banks' gradients one after another, `channels · knots.len()` each.
 ///
 /// # Postconditions
-/// `grad_x` is *written* (each element assigned once); `grad_coef` is
-/// *accumulated* into, so the caller owns its initial value.
+/// `grad_x` is *written*: the first bank's term assigned, the others' added in bank order, so one bank
+/// writes exactly the single-bank value. `grad_coefs` is *accumulated* into, so the caller owns its
+/// initial value.
 #[inline(always)]
 fn backward_chunk<const UNIFORM: bool>(
-    segments: &Segments,
+    banks: &[Segments],
     channels: usize,
     knots: &Knots,
     c: BackwardChunk<'_>,
-    grad_coef: &mut [f32],
+    grad_coefs: &mut [f32],
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
+    debug_assert_eq!(banks.len(), c.grad_ys.len(), "one cotangent per bank");
     // `du/dx` is the forward's `span`: one value, named for each of its two uses.
     let du_dx = 0.5 * (knots.grid() - 1) as f32;
     let last = (knots.grid() - 2) as f32;
     let segs = knots.controls().len();
     // The coefficient gradient by segment (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
-    // Amendments 3 and 6): one accumulator per channel and segment, four control slots wide, each
-    // element adding `gy · w` into its own segment's four slots at once; the chunk's sums are
+    // Amendments 3 and 6): one accumulator per bank, channel and segment, four control slots wide,
+    // each element adding `gy · w` into its own segment's four slots at once; the chunk's sums are
     // folded into its coefficients, per channel, in segment then slot order at the end. Per
     // accumulator these are the additions of the segment-masked form, which added `0 · gy · w` into
     // every other segment, in the same row order without its zeros, so the bits are its bits for
     // finite values. The masked form's pass over every segment made the pullback slower, not
     // faster: 7x at one channel, 1.9x at 32 (measured 2026-10-09).
-    let mut by_segment = vec![[0.0f32; 4]; channels * segs];
+    let per_bank = channels * segs;
+    let mut by_segment = vec![[0.0f32; 4]; banks.len() * per_bank];
     // Runs of elements in row-major order, the channel a counter that wraps, as the forward: the
-    // segments, weights and derivatives of a run at once, then its accumulators and input
-    // gradients by channel and segment.
+    // segments, weights and derivatives of a run at once, then, bank by bank, its accumulators and
+    // input gradients by channel and segment.
     let mut pass = ElementPass::new();
     let mut ch = 0;
-    let runs = c
-        .grad_x
-        .chunks_mut(RUN)
-        .zip(c.grad_y.chunks(RUN))
-        .zip(c.x_clamped.chunks(RUN))
-        .zip(c.interior.chunks(RUN));
-    for (((grad_x, grad_y), x_clamped), interior) in runs {
-        let n = x_clamped.len();
+    for start in (0..c.x_clamped.len()).step_by(RUN) {
+        let end = (start + RUN).min(c.x_clamped.len());
+        let n = end - start;
+        let x_clamped = &c.x_clamped[start..end];
         let ElementPass {
             segment: seg,
             weights,
@@ -574,44 +681,40 @@ fn backward_chunk<const UNIFORM: bool>(
                 dweights[k][e] = dw[k];
             }
         }
-        let (grad_x, grad_y, interior) = (&mut grad_x[..n], &grad_y[..n], &interior[..n]);
-        for e in 0..n {
-            let gy = grad_y[e];
-            // The element's channel and segment: its accumulator and its control values.
-            let at = ch * segs + seg[e] as usize;
-            let slots = &mut by_segment[at];
-            for k in 0..4 {
-                slots[k] += gy * weights[k][e];
-            }
-            // The input gradient as before: the clamp's own Jacobian is `1` inside the closed
-            // interval, `0` outside, read from the recorded `interior` mask (not from `x_clamped`,
-            // which is inside by construction).
-            grad_x[e] = if interior[e] {
-                let c = segments.quads[at];
-                let mut dy_dt = 0.0;
-                for k in 0..4 {
-                    dy_dt += dweights[k][e] * c[k];
-                }
-                // A leaf at depth `d` is `2^d` times narrower in `u`: `dt/dx = span · 2^d`.
-                if UNIFORM {
-                    gy * dy_dt * du_dx
-                } else {
-                    gy * dy_dt * (du_dx * scale[e])
-                }
-            } else {
-                0.0
+        let (grad_x, interior) = (&mut c.grad_x[start..end], &c.interior[start..end]);
+        let first = ch;
+        for (b, (segments, grad_y)) in banks.iter().zip(c.grad_ys).enumerate() {
+            let at = c.offset + start..c.offset + end;
+            let run = BankRun {
+                segments,
+                grad_y: &grad_y[at],
+                interior,
+                pass: &pass,
+                accumulators: &mut by_segment[b * per_bank..(b + 1) * per_bank],
             };
-            ch += 1;
-            if ch == channels {
-                ch = 0;
-            }
+            ch = first;
+            // The first bank writes the input gradient, the others add to it: one bank is the
+            // single-bank kernel exactly, with no choice inside the element loop.
+            ch = if b == 0 {
+                run.pull::<UNIFORM, true>(grad_x, (ch, channels, segs), du_dx)
+            } else {
+                run.pull::<UNIFORM, false>(grad_x, (ch, channels, segs), du_dx)
+            };
         }
     }
-    let accumulators = by_segment.chunks_exact(segs);
-    for (channel_grad, accumulators) in grad_coef.chunks_exact_mut(knots.len()).zip(accumulators) {
-        for (slots, controls) in accumulators.iter().zip(&segments.controls) {
-            for (&sum, &j) in slots.iter().zip(controls) {
-                channel_grad[j] += sum;
+    let coefs = channels * knots.len();
+    for (bank_grad, bank_accumulators) in grad_coefs
+        .chunks_exact_mut(coefs)
+        .zip(by_segment.chunks_exact(per_bank))
+    {
+        let accumulators = bank_accumulators.chunks_exact(segs);
+        for (channel_grad, accumulators) in
+            bank_grad.chunks_exact_mut(knots.len()).zip(accumulators)
+        {
+            for (slots, controls) in accumulators.iter().zip(&banks[0].controls) {
+                for (&sum, &j) in slots.iter().zip(controls) {
+                    channel_grad[j] += sum;
+                }
             }
         }
     }
@@ -658,19 +761,44 @@ pub fn catmull_rom_backward_into(
     grad_y: &[f32],
     grad_x: &mut [f32],
 ) -> Vec<f32> {
-    assert_eq!(grad_y.len(), cache.n * cache.channels);
-    assert_eq!(coef.len(), cache.channels * cache.grid);
-    assert_eq!(grad_x.len(), grad_y.len(), "grad_x must be (n, channels)");
+    let mut banks = catmull_rom_banks_backward_into(&[coef], cache, &[grad_y], grad_x);
+    banks.swap_remove(0)
+}
+
+/// The pullback of [`catmull_rom_banks_forward_into`] (tensor plan 2026-10-22-cr-banks): each bank's
+/// control-point gradient, and the input gradient summed over the banks, written into `grad_x`.
+///
+/// # Preconditions
+/// The banks and the cache of one banks forward; one cotangent per bank, each `n · channels`;
+/// `grad_x.len() == n · channels`.
+///
+/// # Postconditions
+/// Bank `b`'s gradient is bit for bit [`catmull_rom_backward_into`]'s for `coefs[b]` and `grad_ys[b]`;
+/// `grad_x` is the banks' input gradients summed in bank order, every element written, `0` outside the
+/// clamp interval.
+pub fn catmull_rom_banks_backward_into(
+    coefs: &[&[f32]],
+    cache: &CatmullRomCache,
+    grad_ys: &[&[f32]],
+    grad_x: &mut [f32],
+) -> Vec<Vec<f32>> {
+    let elems = cache.n * cache.channels;
+    let len = cache.channels * cache.grid;
+    assert!(!coefs.is_empty(), "at least one bank");
+    assert_eq!(grad_ys.len(), coefs.len(), "one cotangent per bank");
+    for (coef, grad_y) in coefs.iter().zip(grad_ys) {
+        assert_eq!(grad_y.len(), elems);
+        assert_eq!(coef.len(), len);
+    }
+    assert_eq!(grad_x.len(), elems, "grad_x must be (n, channels)");
     let knots = cache
         .knots
         .as_ref()
         .expect("a forward wrote the cache, and recorded its knots");
 
-    let mut grad_coef = vec![0.0; coef.len()];
-
     // Rows split into a FIXED number of blocks. Each block writes its own disjoint
-    // `grad_x` slice (bit-exact) and accumulates into its own private `grad_coef`
-    // slot — 48 floats for california.
+    // `grad_x` slice (bit-exact) and accumulates into its own private gradient
+    // slot per bank — 48 floats for california.
     //
     // **Both paths block identically.** Only the iteration differs, never the
     // arithmetic or the summation order, which is what lets `use_parallel` consult
@@ -685,62 +813,64 @@ pub fn catmull_rom_backward_into(
     // Measured: the `Vec<Vec<f32>>` version cost 132.6 µs/epoch, this one 115.7.
     let stride = block_stride(cache.n, cache.channels);
     let blocks = grad_x.len().div_ceil(stride).max(1);
-    let mut partials = vec![0.0f32; blocks * coef.len()];
+    let block_len = coefs.len() * len;
+    let mut partials = vec![0.0f32; blocks * block_len];
 
-    let segments = Segments::of(coef, cache.channels, knots);
+    let banks: Vec<Segments> = coefs
+        .iter()
+        .map(|coef| Segments::of(coef, cache.channels, knots))
+        .collect();
     let uniform = knots.is_uniform();
-    let kernel = |((((gx, gy), x_clamped), interior), local): BackwardZip<'_>| {
+    let kernel = |(block, (gx, local)): (usize, (&mut [f32], &mut [f32]))| {
+        let span = block * stride..(block * stride + gx.len());
         let chunk = BackwardChunk {
+            grad_ys,
+            offset: span.start,
+            x_clamped: &cache.x_clamped[span.clone()],
+            interior: &cache.interior[span],
             grad_x: gx,
-            grad_y: gy,
-            x_clamped,
-            interior,
         };
         // One choice per call: uniform knots take the uniform segment arithmetic.
         if uniform {
-            backward_chunk::<true>(&segments, cache.channels, knots, chunk, local);
+            backward_chunk::<true>(&banks, cache.channels, knots, chunk, local);
         } else {
-            backward_chunk::<false>(&segments, cache.channels, knots, chunk, local);
+            backward_chunk::<false>(&banks, cache.channels, knots, chunk, local);
         }
     };
 
     #[cfg(feature = "parallel")]
-    if use_parallel(grad_y.len()) {
+    if use_parallel(elems) {
         grad_x
             .par_chunks_mut(stride)
-            .zip(grad_y.par_chunks(stride))
-            .zip(cache.x_clamped.par_chunks(stride))
-            .zip(cache.interior.par_chunks(stride))
-            .zip(partials.par_chunks_mut(coef.len()))
+            .zip(partials.par_chunks_mut(block_len))
+            .enumerate()
             .for_each(kernel);
     } else {
         grad_x
             .chunks_mut(stride)
-            .zip(grad_y.chunks(stride))
-            .zip(cache.x_clamped.chunks(stride))
-            .zip(cache.interior.chunks(stride))
-            .zip(partials.chunks_mut(coef.len()))
+            .zip(partials.chunks_mut(block_len))
+            .enumerate()
             .for_each(kernel);
     }
 
     #[cfg(not(feature = "parallel"))]
     grad_x
         .chunks_mut(stride)
-        .zip(grad_y.chunks(stride))
-        .zip(cache.x_clamped.chunks(stride))
-        .zip(cache.interior.chunks(stride))
-        .zip(partials.chunks_mut(coef.len()))
+        .zip(partials.chunks_mut(block_len))
+        .enumerate()
         .for_each(kernel);
 
     // Summed in block order, which is fixed by the buffer layout and not by the
-    // scheduler — this is what makes `grad_coef` thread-count independent.
-    for local in partials.chunks(coef.len()) {
-        for (acc, value) in grad_coef.iter_mut().zip(local) {
-            *acc += value;
+    // scheduler — this is what makes every bank's gradient thread-count independent.
+    let mut grad_coefs = vec![vec![0.0f32; len]; coefs.len()];
+    for local in partials.chunks(block_len) {
+        for (grad, values) in grad_coefs.iter_mut().zip(local.chunks(len)) {
+            for (acc, value) in grad.iter_mut().zip(values) {
+                *acc += value;
+            }
         }
     }
-
-    grad_coef
+    grad_coefs
 }
 
 /// Chebyshev basis evaluated at uniform CR knots in `[-1, 1]`.
@@ -814,11 +944,39 @@ pub fn chebyshev_cr_forward_into(
     k: usize,
     into: CatmullRomBuffers<'_>,
 ) -> (Vec<f32>, Vec<f32>) {
+    let CatmullRomBuffers { out, cache } = into;
+    let banks = CatmullRomBanksBuffers {
+        outs: vec![out],
+        cache,
+    };
+    let (mut controls, basis) =
+        chebyshev_cr_banks_forward_into(&[coef], x, n, channels, (grid, k), banks);
+    (controls.swap_remove(0), basis)
+}
+
+/// [`chebyshev_cr_forward_into`] for several banks of Chebyshev terms over one input (tensor plan
+/// 2026-10-22-cr-banks): each bank's control points generated, then one banks forward
+/// ([`catmull_rom_banks_forward_into`]). Returns each bank's control points and the knot basis.
+///
+/// # Preconditions
+/// At least one bank, each `channels · k` terms; `grid >= 3`; the buffers as the banks forward's.
+pub fn chebyshev_cr_banks_forward_into(
+    coefs: &[&[f32]],
+    x: &[f32],
+    n: usize,
+    channels: usize,
+    (grid, k): (usize, usize),
+    into: CatmullRomBanksBuffers<'_>,
+) -> (Vec<Vec<f32>>, Vec<f32>) {
     let basis = chebyshev_knot_basis(grid, k);
-    let control = chebyshev_control_points(coef, &basis, channels, grid, k);
+    let controls: Vec<Vec<f32>> = coefs
+        .iter()
+        .map(|coef| chebyshev_control_points(coef, &basis, channels, grid, k))
+        .collect();
+    let banks: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
     // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
-    catmull_rom_forward_into(&control, x, n, channels, &Knots::uniform(grid), into);
-    (control, basis)
+    catmull_rom_banks_forward_into(&banks, x, n, channels, &Knots::uniform(grid), into);
+    (controls, basis)
 }
 
 /// Backward Chebyshev-CR train path.
@@ -847,7 +1005,36 @@ pub fn chebyshev_cr_backward_into(
     k: usize,
     grad_x: &mut [f32],
 ) -> Vec<f32> {
-    let cr_grad_coef = catmull_rom_backward_into(control_points, cache, grad_y, grad_x);
+    let mut banks =
+        chebyshev_cr_banks_backward_into(&[control_points], basis, cache, &[grad_y], k, grad_x);
+    banks.swap_remove(0)
+}
+
+/// The pullback of [`chebyshev_cr_banks_forward_into`]: each bank's Chebyshev-term gradient, projected
+/// from its control-point gradient, and the input gradient summed over the banks into `grad_x`
+/// ([`catmull_rom_banks_backward_into`]).
+pub fn chebyshev_cr_banks_backward_into(
+    controls: &[&[f32]],
+    basis: &[f32],
+    cache: &CatmullRomCache,
+    grad_ys: &[&[f32]],
+    k: usize,
+    grad_x: &mut [f32],
+) -> Vec<Vec<f32>> {
+    catmull_rom_banks_backward_into(controls, cache, grad_ys, grad_x)
+        .iter()
+        .map(|cr_grad_coef| chebyshev_terms_gradient(cr_grad_coef, basis, cache, k))
+        .collect()
+}
+
+/// The Chebyshev terms' gradient from their control points' (`(channels, grid)`): each term's the
+/// control gradients weighted by the term at the knots.
+fn chebyshev_terms_gradient(
+    cr_grad_coef: &[f32],
+    basis: &[f32],
+    cache: &CatmullRomCache,
+    k: usize,
+) -> Vec<f32> {
     let mut grad_coef = vec![0.0; cache.channels * k];
     for ch in 0..cache.channels {
         for term in 0..k {
