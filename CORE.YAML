@@ -202,6 +202,16 @@ core:
   # hand; and canonical mechanics coming out as a perfect matching, `J = [[0, I], [-I, 0]]`. The
   # simulator pins the same correspondence from its own side against the sign rule written out, so
   # neither can drift without one of the two failing.
+  #
+  # `pcg.rs`, `least_squares.rs`, `robust.rs` added 2026-10-19: the SECOND GRANT, approved by the user
+  # ("OK, engedélyezve", 2026-10-19 22:5x) after the narrow scope above was named as the obstacle --
+  # plan docs/plans/2026-10-19-numerics-optimizers, O1. Preconditioned CG on symmetric (semi)definite
+  # operators (`f64`; `hymeko_tensor::linalg`'s SPD solvers stay `f32` by their contract), and the
+  # general least-squares loops: Gauss--Newton over `trait LeastSquares` (normal equations and
+  # retraction stated by the problem, the increment by `trait IncrementSolver`) and IRLS with robust
+  # kernels. Moved out of `nagare_slam` (the SE(2) pose graph, now one implementation of the trait)
+  # and `nagare_autoholonomy` (PCG). LM, L-BFGS, Steihaug, ADMM, FAS and SE-Sync are outlined in that
+  # plan as O2--O7; each still needs its own approval. The dependency-free contract is unchanged.
 
 
   # Build contract. `+sse4.1` makes `f32::floor` one `roundss` instead of a libm call in the
