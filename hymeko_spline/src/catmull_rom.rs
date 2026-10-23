@@ -252,14 +252,95 @@ pub struct ChebyshevCrBackward {
     pub grad_coef: Vec<f32>,
 }
 
-/// The per-element buffers a forward fills for a block of rows: each bank's output, and the one tape.
+/// The marker a route holds for an element no bank is read at (Nagare plan 2026-10-23-incidence-partition,
+/// Amendment 5): the routed forward writes it `0`, and the routed pullback adds nothing for it.
+pub const SKIP: u8 = u8::MAX;
+
+/// The first pass's values for one run of a forward, as its second pass reads them.
+struct EmitRun<'p> {
+    /// The run's first element in the block.
+    start: usize,
+    /// The channel of the run's first element.
+    first: usize,
+    channels: usize,
+    seg: &'p [u32],
+    weights: [&'p [f32]; 4],
+}
+
+/// How a forward's second pass writes a run: every bank into its own output ([`AllBanks`]), or each element's
+/// routed bank alone into one ([`RoutedBank`]). Monomorphized into the row kernel, so neither carries a choice
+/// inside its element loop.
+trait ForwardEmit {
+    /// Writes the run from its segments and weights; returns the channel after the run.
+    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize;
+}
+
+/// One element's value on one bank: its four weights against its channel's and segment's control values.
+#[inline(always)]
+fn element_value(segments: &Segments, ch: usize, run: &EmitRun<'_>, e: usize) -> f32 {
+    let c = segments.quad(ch, run.seg[e] as usize);
+    let [w0, w1, w2, w3] = run.weights;
+    w0[e] * c[0] + w1[e] * c[1] + w2[e] * c[2] + w3[e] * c[3]
+}
+
+/// Every bank's output slice over the block.
+struct AllBanks<'a, 'b> {
+    outs: &'b mut [&'a mut [f32]],
+}
+
+impl ForwardEmit for AllBanks<'_, '_> {
+    #[inline(always)]
+    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize {
+        let n = run.seg.len();
+        let mut ch = run.first;
+        for (segments, out) in banks.iter().zip(self.outs.iter_mut()) {
+            let out = &mut out[run.start..run.start + n];
+            ch = run.first;
+            for (e, slot) in out.iter_mut().enumerate() {
+                *slot = element_value(segments, ch, run, e);
+                ch += 1;
+                if ch == run.channels {
+                    ch = 0;
+                }
+            }
+        }
+        ch
+    }
+}
+
+/// Each element's routed bank over the block, into one output: an element routed [`SKIP`] is written `0`.
+struct RoutedBank<'a> {
+    route: &'a [u8],
+    out: &'a mut [f32],
+}
+
+impl ForwardEmit for RoutedBank<'_> {
+    #[inline(always)]
+    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize {
+        let n = run.seg.len();
+        let route = &self.route[run.start..run.start + n];
+        let out = &mut self.out[run.start..run.start + n];
+        let mut ch = run.first;
+        for (e, (slot, &bank)) in out.iter_mut().zip(route).enumerate() {
+            *slot = banks
+                .get(usize::from(bank))
+                .map_or(0.0, |segments| element_value(segments, ch, run, e));
+            ch += 1;
+            if ch == run.channels {
+                ch = 0;
+            }
+        }
+        ch
+    }
+}
+
+/// The per-element buffers a forward fills for a block of rows: its outputs, as `emit` writes them, and the one tape.
 ///
 /// Bundled into a struct so the shared row kernel takes four arguments instead of
 /// seven (§6.5 #6) and so the sequential and parallel paths call *one*
 /// implementation rather than each carrying a copy of the arithmetic (§6.1).
-struct ForwardRow<'a, 'b> {
-    /// Each bank's output slice over the block.
-    outs: &'b mut [&'a mut [f32]],
+struct ForwardRow<'a, E> {
+    emit: E,
     x_clamped: &'a mut [f32],
     interior: &'a mut [bool],
 }
@@ -278,15 +359,14 @@ struct ForwardRow<'a, 'b> {
 /// of `channels`; one output per bank in `banks`; each bank's table over `channels × knots.len()`
 /// coefficients.
 #[inline(always)]
-fn forward_block<const UNIFORM: bool>(
+fn forward_block<const UNIFORM: bool, E: ForwardEmit>(
     banks: &[Segments],
     knots: &Knots,
     channels: usize,
     x_block: &[f32],
-    w: ForwardRow<'_, '_>,
+    mut w: ForwardRow<'_, E>,
 ) {
     debug_assert_eq!(x_block.len() % channels, 0, "block must be whole rows");
-    debug_assert_eq!(banks.len(), w.outs.len(), "one output per bank");
     let (span, last) = (0.5 * (knots.grid() - 1) as f32, (knots.grid() - 2) as f32);
     let mut pass = ElementPass::new();
     let mut ch = 0;
@@ -324,37 +404,33 @@ fn forward_block<const UNIFORM: bool>(
             // Closed interval: `±1` is interior, matching the guard this replaces.
             interior[e] = (-1.0..=1.0).contains(&raw);
         }
-        // Second pass, bank by bank: each element's four control values, by its channel and segment.
-        let first = ch;
-        for (segments, out) in banks.iter().zip(w.outs.iter_mut()) {
-            let out = &mut out[start..end];
-            ch = first;
-            for e in 0..n {
-                let c = segments.quad(ch, seg[e] as usize);
-                out[e] = w0[e] * c[0] + w1[e] * c[1] + w2[e] * c[2] + w3[e] * c[3];
-                ch += 1;
-                if ch == channels {
-                    ch = 0;
-                }
-            }
-        }
+        // Second pass: each element's four control values, by its channel and segment, on every bank or on its
+        // routed bank alone.
+        let run = EmitRun {
+            start,
+            first: ch,
+            channels,
+            seg: &*seg,
+            weights: [&*w0, &*w1, &*w2, &*w3],
+        };
+        ch = w.emit.emit(banks, &run);
     }
 }
 
 /// [`forward_block`] instantiated for the knots: uniform knots take the uniform segment arithmetic,
 /// which vectorises; refined ones locate their leaves. One choice per call, never per element.
 #[inline(always)]
-fn forward_block_over(
+fn forward_block_over<E: ForwardEmit>(
     banks: &[Segments],
     knots: &Knots,
     channels: usize,
     x_block: &[f32],
-    w: ForwardRow<'_, '_>,
+    w: ForwardRow<'_, E>,
 ) {
     if knots.is_uniform() {
-        forward_block::<true>(banks, knots, channels, x_block, w);
+        forward_block::<true, _>(banks, knots, channels, x_block, w);
     } else {
-        forward_block::<false>(banks, knots, channels, x_block, w);
+        forward_block::<false, _>(banks, knots, channels, x_block, w);
     }
 }
 
@@ -464,14 +540,7 @@ pub fn catmull_rom_banks_forward_into(
         assert_eq!(out.len(), x.len(), "out must be (n, channels)");
     }
 
-    // Refilled, not rebuilt: `resize` keeps the capacity, and the blocks below overwrite every
-    // element, so nothing a previous call left is read.
-    cache.x_clamped.resize(x.len(), 0.0);
-    cache.interior.resize(x.len(), false);
-    cache.n = n;
-    cache.channels = channels;
-    cache.grid = knots.len();
-    cache.knots = Some(knots.clone());
+    refill(cache, (n, channels), knots);
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
     let banks: Vec<Segments> = coefs
         .iter()
@@ -506,7 +575,7 @@ pub fn catmull_rom_banks_forward_into(
                     channels,
                     x_b,
                     ForwardRow {
-                        outs,
+                        emit: AllBanks { outs },
                         x_clamped: xc_b,
                         interior: in_b,
                     },
@@ -521,7 +590,93 @@ pub fn catmull_rom_banks_forward_into(
         channels,
         x,
         ForwardRow {
-            outs: &mut outs,
+            emit: AllBanks { outs: &mut outs },
+            x_clamped,
+            interior,
+        },
+    );
+}
+
+/// The tape refilled for a call over `n` rows of `channels`: `resize` keeps the capacity, and the blocks overwrite
+/// every element, so nothing a previous call left is read.
+fn refill(cache: &mut CatmullRomCache, (n, channels): (usize, usize), knots: &Knots) {
+    cache.x_clamped.resize(n * channels, 0.0);
+    cache.interior.resize(n * channels, false);
+    cache.n = n;
+    cache.channels = channels;
+    cache.grid = knots.len();
+    cache.knots = Some(knots.clone());
+}
+
+/// Several banks of control points over one input, each element evaluated on its routed bank alone (Nagare plan
+/// 2026-10-23-incidence-partition, Amendment 5): element `e` is [`catmull_rom_forward`] of `coefs[route[e]]` at `e`,
+/// or `0` where `route[e] == SKIP`. The clamp, the segment and the weights are computed once, into the one tape a
+/// banks forward writes.
+///
+/// # Preconditions
+/// As [`catmull_rom_banks_forward_into`], with one output; `route.len() == x.len()`, every route below
+/// `coefs.len()` or [`SKIP`].
+///
+/// # Postconditions
+/// `into.out[e]` is bit for bit the routed bank's single-bank output at `e`; `into.cache` the single-bank cache.
+pub fn catmull_rom_routed_forward_into(
+    coefs: &[&[f32]],
+    route: &[u8],
+    x: &[f32],
+    (n, channels): (usize, usize),
+    knots: &Knots,
+    into: CatmullRomBuffers<'_>,
+) {
+    let CatmullRomBuffers { out, cache } = into;
+    assert!(!coefs.is_empty(), "at least one bank");
+    assert_eq!(x.len(), n * channels);
+    assert_eq!(route.len(), x.len(), "one route per element");
+    assert_eq!(out.len(), x.len(), "out must be (n, channels)");
+    for coef in coefs {
+        assert_eq!(coef.len(), channels * knots.len());
+    }
+    debug_assert!(route
+        .iter()
+        .all(|&b| b == SKIP || usize::from(b) < coefs.len()));
+    refill(cache, (n, channels), knots);
+    let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
+    let banks: Vec<Segments> = coefs
+        .iter()
+        .map(|coef| Segments::of(coef, channels, knots))
+        .collect();
+    #[cfg(feature = "parallel")]
+    if use_parallel(x.len()) {
+        let stride = block_stride(n, channels);
+        out.par_chunks_mut(stride)
+            .zip(route.par_chunks(stride))
+            .zip(x_clamped.par_chunks_mut(stride))
+            .zip(interior.par_chunks_mut(stride))
+            .zip(x.par_chunks(stride))
+            .for_each(|((((out_b, route_b), xc_b), in_b), x_b)| {
+                forward_block_over(
+                    &banks,
+                    knots,
+                    channels,
+                    x_b,
+                    ForwardRow {
+                        emit: RoutedBank {
+                            route: route_b,
+                            out: out_b,
+                        },
+                        x_clamped: xc_b,
+                        interior: in_b,
+                    },
+                );
+            });
+        return;
+    }
+    forward_block_over(
+        &banks,
+        knots,
+        channels,
+        x,
+        ForwardRow {
+            emit: RoutedBank { route, out },
             x_clamped,
             interior,
         },
@@ -533,16 +688,47 @@ pub fn catmull_rom_banks_forward_into(
 /// Every slice covers the same contiguous element range, a whole number of rows
 /// long. Bundled for the same reason as [`ForwardRow`]: one shared kernel, and a
 /// parameter list that stays under the §6.5 #6 limit.
-struct BackwardChunk<'a> {
+struct BackwardChunk<'a, P> {
     grad_x: &'a mut [f32],
-    /// Each bank's whole output cotangent; the chunk reads it from `offset`.
-    grad_ys: &'a [&'a [f32]],
+    /// The cotangents, every bank's ([`AllCotangents`]) or the routed one's ([`RoutedCotangent`]), over the whole
+    /// input; the chunk reads them from `offset`.
+    pull: &'a P,
     /// The chunk's first element in the cotangents.
     offset: usize,
     /// Clamped inputs from the forward; the segment is recomputed from them ([`segment`]).
     x_clamped: &'a [f32],
     /// Per-element interior mask from the forward; see [`CatmullRomCache::interior`].
     interior: &'a [bool],
+}
+
+/// One element's pullback on one bank: `gy · w` into its channel's and segment's four accumulator slots, and its
+/// input-gradient term returned -- the clamp's own Jacobian is `1` inside the closed interval and `0` outside, read
+/// from the recorded `interior` mask (not from `x_clamped`, which is inside by construction).
+#[inline(always)]
+fn element_pull<const UNIFORM: bool>(
+    (segments, slots): (&Segments, &mut [f32; 4]),
+    (pass, e, at): (&ElementPass, usize, usize),
+    gy: f32,
+    interior: bool,
+    du_dx: f32,
+) -> f32 {
+    for (slot, weights) in slots.iter_mut().zip(&pass.weights) {
+        *slot += gy * weights[e];
+    }
+    if !interior {
+        return 0.0;
+    }
+    let c = segments.quads[at];
+    let mut dy_dt = 0.0;
+    for (dweights, &control) in pass.dweights.iter().zip(&c) {
+        dy_dt += dweights[e] * control;
+    }
+    // A leaf at depth `d` is `2^d` times narrower in `u`: `dt/dx = span · 2^d`.
+    if UNIFORM {
+        gy * dy_dt * du_dx
+    } else {
+        gy * dy_dt * (du_dx * pass.scale[e])
+    }
 }
 
 /// One bank over one run of the backward: its table, its cotangent over the run, the run's interior mask
@@ -566,37 +752,16 @@ impl BankRun<'_> {
         (mut ch, channels, segs): (usize, usize, usize),
         du_dx: f32,
     ) -> usize {
-        let ElementPass {
-            segment: seg,
-            weights,
-            dweights,
-            scale,
-        } = self.pass;
         for (e, (gx, &gy)) in grad_x.iter_mut().zip(self.grad_y).enumerate() {
             // The element's channel and segment: its accumulator and its control values.
-            let at = ch * segs + seg[e] as usize;
-            let slots = &mut self.accumulators[at];
-            for k in 0..4 {
-                slots[k] += gy * weights[k][e];
-            }
-            // The input gradient as before: the clamp's own Jacobian is `1` inside the closed
-            // interval, `0` outside, read from the recorded `interior` mask (not from `x_clamped`,
-            // which is inside by construction).
-            let term = if self.interior[e] {
-                let c = self.segments.quads[at];
-                let mut dy_dt = 0.0;
-                for k in 0..4 {
-                    dy_dt += dweights[k][e] * c[k];
-                }
-                // A leaf at depth `d` is `2^d` times narrower in `u`: `dt/dx = span · 2^d`.
-                if UNIFORM {
-                    gy * dy_dt * du_dx
-                } else {
-                    gy * dy_dt * (du_dx * scale[e])
-                }
-            } else {
-                0.0
-            };
+            let at = ch * segs + self.pass.segment[e] as usize;
+            let term = element_pull::<UNIFORM>(
+                (self.segments, &mut self.accumulators[at]),
+                (self.pass, e, at),
+                gy,
+                self.interior[e],
+                du_dx,
+            );
             if ASSIGN {
                 *gx = term;
             } else {
@@ -604,6 +769,107 @@ impl BankRun<'_> {
             }
             ch += 1;
             if ch == channels {
+                ch = 0;
+            }
+        }
+        ch
+    }
+}
+
+/// The per-element context a pull reads for one run of a chunk: the run's elements in the whole input, its interior
+/// mask and first pass, and the channel layout.
+struct PullRun<'p> {
+    at: std::ops::Range<usize>,
+    interior: &'p [bool],
+    pass: &'p ElementPass,
+    first: usize,
+    channels: usize,
+    segs: usize,
+    du_dx: f32,
+}
+
+/// How a backward's second pass reads its cotangents for a run: every bank's ([`AllCotangents`]), or each element's
+/// routed bank's alone ([`RoutedCotangent`]). Monomorphized into the chunk kernel.
+trait BackwardPull: Sync {
+    /// Accumulates the run into the banks' accumulators (`per_bank` each, bank-major in `accumulators`) and writes its
+    /// input gradient into `grad_x`; returns the channel after the run.
+    fn pull<const UNIFORM: bool>(
+        &self,
+        banks: (&[Segments], &mut [[f32; 4]], usize),
+        grad_x: &mut [f32],
+        run: &PullRun<'_>,
+    ) -> usize;
+}
+
+/// Every bank's whole output cotangent: the banks backward.
+struct AllCotangents<'a> {
+    grad_ys: &'a [&'a [f32]],
+}
+
+impl BackwardPull for AllCotangents<'_> {
+    #[inline(always)]
+    fn pull<const UNIFORM: bool>(
+        &self,
+        (banks, accumulators, per_bank): (&[Segments], &mut [[f32; 4]], usize),
+        grad_x: &mut [f32],
+        run: &PullRun<'_>,
+    ) -> usize {
+        let mut ch = run.first;
+        for (b, (segments, grad_y)) in banks.iter().zip(self.grad_ys).enumerate() {
+            let bank = BankRun {
+                segments,
+                grad_y: &grad_y[run.at.clone()],
+                interior: run.interior,
+                pass: run.pass,
+                accumulators: &mut accumulators[b * per_bank..(b + 1) * per_bank],
+            };
+            // The first bank writes the input gradient, the others add to it: one bank is the
+            // single-bank kernel exactly, with no choice inside the element loop.
+            ch = if b == 0 {
+                bank.pull::<UNIFORM, true>(grad_x, (run.first, run.channels, run.segs), run.du_dx)
+            } else {
+                bank.pull::<UNIFORM, false>(grad_x, (run.first, run.channels, run.segs), run.du_dx)
+            };
+        }
+        ch
+    }
+}
+
+/// The one output cotangent of a routed forward and its routes: each element's into its routed bank alone, an element
+/// routed [`SKIP`] adding nothing and its input gradient `0` (Nagare plan 2026-10-23-incidence-partition,
+/// Amendment 5).
+struct RoutedCotangent<'a> {
+    route: &'a [u8],
+    grad_y: &'a [f32],
+}
+
+impl BackwardPull for RoutedCotangent<'_> {
+    #[inline(always)]
+    fn pull<const UNIFORM: bool>(
+        &self,
+        (banks, accumulators, per_bank): (&[Segments], &mut [[f32; 4]], usize),
+        grad_x: &mut [f32],
+        run: &PullRun<'_>,
+    ) -> usize {
+        let (route, grad_y) = (&self.route[run.at.clone()], &self.grad_y[run.at.clone()]);
+        let mut ch = run.first;
+        for (e, ((gx, &gy), &bank)) in grad_x.iter_mut().zip(grad_y).zip(route).enumerate() {
+            let b = usize::from(bank);
+            *gx = match banks.get(b) {
+                Some(segments) => {
+                    let at = ch * run.segs + run.pass.segment[e] as usize;
+                    element_pull::<UNIFORM>(
+                        (segments, &mut accumulators[b * per_bank + at]),
+                        (run.pass, e, at),
+                        gy,
+                        run.interior[e],
+                        run.du_dx,
+                    )
+                }
+                None => 0.0,
+            };
+            ch += 1;
+            if ch == run.channels {
                 ch = 0;
             }
         }
@@ -623,15 +889,14 @@ impl BankRun<'_> {
 /// writes exactly the single-bank value. `grad_coefs` is *accumulated* into, so the caller owns its
 /// initial value.
 #[inline(always)]
-fn backward_chunk<const UNIFORM: bool>(
+fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
     banks: &[Segments],
     channels: usize,
     knots: &Knots,
-    c: BackwardChunk<'_>,
+    c: BackwardChunk<'_, P>,
     grad_coefs: &mut [f32],
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
-    debug_assert_eq!(banks.len(), c.grad_ys.len(), "one cotangent per bank");
     // `du/dx` is the forward's `span`: one value, named for each of its two uses.
     let du_dx = 0.5 * (knots.grid() - 1) as f32;
     let last = (knots.grid() - 2) as f32;
@@ -681,26 +946,20 @@ fn backward_chunk<const UNIFORM: bool>(
                 dweights[k][e] = dw[k];
             }
         }
-        let (grad_x, interior) = (&mut c.grad_x[start..end], &c.interior[start..end]);
-        let first = ch;
-        for (b, (segments, grad_y)) in banks.iter().zip(c.grad_ys).enumerate() {
-            let at = c.offset + start..c.offset + end;
-            let run = BankRun {
-                segments,
-                grad_y: &grad_y[at],
-                interior,
-                pass: &pass,
-                accumulators: &mut by_segment[b * per_bank..(b + 1) * per_bank],
-            };
-            ch = first;
-            // The first bank writes the input gradient, the others add to it: one bank is the
-            // single-bank kernel exactly, with no choice inside the element loop.
-            ch = if b == 0 {
-                run.pull::<UNIFORM, true>(grad_x, (ch, channels, segs), du_dx)
-            } else {
-                run.pull::<UNIFORM, false>(grad_x, (ch, channels, segs), du_dx)
-            };
-        }
+        let run = PullRun {
+            at: c.offset + start..c.offset + end,
+            interior: &c.interior[start..end],
+            pass: &pass,
+            first: ch,
+            channels,
+            segs,
+            du_dx,
+        };
+        ch = c.pull.pull::<UNIFORM>(
+            (banks, &mut by_segment, per_bank),
+            &mut c.grad_x[start..end],
+            &run,
+        );
     }
     let coefs = channels * knots.len();
     for (bank_grad, bank_accumulators) in grad_coefs
@@ -783,11 +1042,48 @@ pub fn catmull_rom_banks_backward_into(
     grad_x: &mut [f32],
 ) -> Vec<Vec<f32>> {
     let elems = cache.n * cache.channels;
+    assert_eq!(grad_ys.len(), coefs.len(), "one cotangent per bank");
+    for grad_y in grad_ys {
+        assert_eq!(grad_y.len(), elems);
+    }
+    backward_over(coefs, cache, grad_x, &AllCotangents { grad_ys })
+}
+
+/// The pullback of [`catmull_rom_routed_forward_into`] (Nagare plan 2026-10-23-incidence-partition, Amendment 5):
+/// each bank's control-point gradient from the elements routed to it, and each element's input gradient from its
+/// routed bank, written into `grad_x`; an element routed [`SKIP`] adds nothing and is written `0`.
+///
+/// # Preconditions
+/// The banks, routes and cache of one routed forward; `grad_y.len() == grad_x.len() == n · channels`.
+///
+/// # Postconditions
+/// The gradients are [`catmull_rom_banks_backward_into`]'s under each bank's cotangent `grad_y` at the elements routed
+/// to it and zero elsewhere, bit for bit for finite values (the zeros it no longer adds aside).
+pub fn catmull_rom_routed_backward_into(
+    coefs: &[&[f32]],
+    route: &[u8],
+    cache: &CatmullRomCache,
+    grad_y: &[f32],
+    grad_x: &mut [f32],
+) -> Vec<Vec<f32>> {
+    let elems = cache.n * cache.channels;
+    assert_eq!(grad_y.len(), elems);
+    assert_eq!(route.len(), elems, "one route per element");
+    backward_over(coefs, cache, grad_x, &RoutedCotangent { route, grad_y })
+}
+
+/// The one pullback of a banks or routed forward: blocks of rows, each its own `grad_x` slice and accumulators, the
+/// partials summed in block order.
+fn backward_over<P: BackwardPull>(
+    coefs: &[&[f32]],
+    cache: &CatmullRomCache,
+    grad_x: &mut [f32],
+    pull: &P,
+) -> Vec<Vec<f32>> {
+    let elems = cache.n * cache.channels;
     let len = cache.channels * cache.grid;
     assert!(!coefs.is_empty(), "at least one bank");
-    assert_eq!(grad_ys.len(), coefs.len(), "one cotangent per bank");
-    for (coef, grad_y) in coefs.iter().zip(grad_ys) {
-        assert_eq!(grad_y.len(), elems);
+    for coef in coefs {
         assert_eq!(coef.len(), len);
     }
     assert_eq!(grad_x.len(), elems, "grad_x must be (n, channels)");
@@ -824,7 +1120,7 @@ pub fn catmull_rom_banks_backward_into(
     let kernel = |(block, (gx, local)): (usize, (&mut [f32], &mut [f32]))| {
         let span = block * stride..(block * stride + gx.len());
         let chunk = BackwardChunk {
-            grad_ys,
+            pull,
             offset: span.start,
             x_clamped: &cache.x_clamped[span.clone()],
             interior: &cache.interior[span],
@@ -832,9 +1128,9 @@ pub fn catmull_rom_banks_backward_into(
         };
         // One choice per call: uniform knots take the uniform segment arithmetic.
         if uniform {
-            backward_chunk::<true>(&banks, cache.channels, knots, chunk, local);
+            backward_chunk::<true, _>(&banks, cache.channels, knots, chunk, local);
         } else {
-            backward_chunk::<false>(&banks, cache.channels, knots, chunk, local);
+            backward_chunk::<false, _>(&banks, cache.channels, knots, chunk, local);
         }
     };
 
@@ -1022,6 +1318,47 @@ pub fn chebyshev_cr_banks_backward_into(
     grad_x: &mut [f32],
 ) -> Vec<Vec<f32>> {
     catmull_rom_banks_backward_into(controls, cache, grad_ys, grad_x)
+        .iter()
+        .map(|cr_grad_coef| chebyshev_terms_gradient(cr_grad_coef, basis, cache, k))
+        .collect()
+}
+
+/// [`chebyshev_cr_banks_forward_into`] with each element evaluated on its routed bank alone, into one output
+/// ([`catmull_rom_routed_forward_into`]). Returns each bank's control points and the knot basis.
+///
+/// # Preconditions
+/// As [`chebyshev_cr_banks_forward_into`] with one output, and the routes as [`catmull_rom_routed_forward_into`]'s.
+pub fn chebyshev_cr_routed_forward_into(
+    coefs: &[&[f32]],
+    route: &[u8],
+    x: &[f32],
+    (n, channels): (usize, usize),
+    (grid, k): (usize, usize),
+    into: CatmullRomBuffers<'_>,
+) -> (Vec<Vec<f32>>, Vec<f32>) {
+    let basis = chebyshev_knot_basis(grid, k);
+    let controls: Vec<Vec<f32>> = coefs
+        .iter()
+        .map(|coef| chebyshev_control_points(coef, &basis, channels, grid, k))
+        .collect();
+    let banks: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
+    // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
+    catmull_rom_routed_forward_into(&banks, route, x, (n, channels), &Knots::uniform(grid), into);
+    (controls, basis)
+}
+
+/// The pullback of [`chebyshev_cr_routed_forward_into`]: each bank's Chebyshev-term gradient, projected from its
+/// control-point gradient, and each element's input gradient from its routed bank, into `grad_x`
+/// ([`catmull_rom_routed_backward_into`]).
+pub fn chebyshev_cr_routed_backward_into(
+    controls: &[&[f32]],
+    basis: &[f32],
+    (cache, route): (&CatmullRomCache, &[u8]),
+    grad_y: &[f32],
+    k: usize,
+    grad_x: &mut [f32],
+) -> Vec<Vec<f32>> {
+    catmull_rom_routed_backward_into(controls, route, cache, grad_y, grad_x)
         .iter()
         .map(|cr_grad_coef| chebyshev_terms_gradient(cr_grad_coef, basis, cache, k))
         .collect()
