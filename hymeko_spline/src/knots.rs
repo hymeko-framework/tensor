@@ -3,11 +3,12 @@
 //! refined to its own dyadic depth -- `2^d` equal leaves, the complete orthtree of that cell -- so the
 //! spline has resolution where its inputs and its curvature are, and stays coarse elsewhere.
 //!
-//! The uniform grid is the knots at depth zero everywhere, and the kernel evaluates it by its own
-//! arithmetic, bit for bit. Refined knots take the non-uniform Catmull–Rom, the cubic Hermite whose
-//! tangents are the neighbouring chords' slopes -- at a leaf of equally spaced neighbours the
-//! uniform Catmull–Rom in exact arithmetic. The ends replicate their control points over a mirrored
-//! spacing, as the uniform spline always has.
+//! The uniform grid is the knots at depth zero everywhere, and the kernel locates its segments by its
+//! own arithmetic, bit for bit. Refined knots take the non-uniform Catmull–Rom, the cubic Hermite
+//! whose tangents are the neighbouring chords' slopes. On every leaf the four weights are a cubic in
+//! the leaf's coordinate, `w(t) = B τ(t)` with `τ = (1, t, t², t³)`, and the table holds that basis
+//! `B` per leaf -- at a leaf of equally spaced neighbours the uniform Catmull–Rom's, exactly. The
+//! ends replicate their control points over a mirrored spacing, as the uniform spline always has.
 //!
 //! A point finds its leaf without a search: its base segment by `floor`, its leaf within it by
 //! `floor(s 2^d)`, a table read.
@@ -22,7 +23,9 @@ pub struct Knots(Arc<KnotTable>);
 
 impl PartialEq for Knots {
     fn eq(&self, other: &Self) -> bool {
-        self.0.grid == other.0.grid && self.0.depths == other.0.depths
+        self.0.grid == other.0.grid
+            && self.0.depths == other.0.depths
+            && self.0.tangents == other.0.tangents
     }
 }
 
@@ -32,10 +35,25 @@ impl std::hash::Hash for Knots {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.grid.hash(state);
         self.0.depths.hash(state);
+        self.0.tangents.hash(state);
     }
 }
 
-#[derive(Debug)]
+/// How the spline's tangent at each knot is chosen (Nagare plan 2026-10-23-c1-lattice-activations, Amendment 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Tangents {
+    /// The Catmull–Rom chord: the slope from the knot's left neighbour to its right one.
+    #[default]
+    Chord,
+    /// The chord, bounded by the knot's class in the signed knot graph: a knot whose two edges' secants differ in sign
+    /// (or one is zero) takes slope zero; one whose secants agree takes the candidate of least magnitude among the
+    /// chord and three times each secant, the chord first on a tie. An end knot keeps the chord. Every leaf is then
+    /// monotone between its two knot values, so the spline stays within its control points' range without a clamp,
+    /// and equals the chord spline wherever every knot takes the chord.
+    Bounded,
+}
+
+#[derive(Debug, Clone)]
 struct KnotTable {
     /// Base knots, uniform over `[-1, 1]`.
     grid: usize,
@@ -50,9 +68,29 @@ struct KnotTable {
     /// Per leaf -- the segment between two consecutive knots, in order -- the four control points
     /// it reads, the ends replicated.
     controls: Vec<[usize; 4]>,
-    /// Per leaf `h / (x_{k+1} − x_{k−1})` and `h / (x_{k+2} − x_k)`, `h` its width: the tangents'
-    /// shares.
-    ratio: Vec<[f32; 2]>,
+    /// Per leaf its basis ([`leaf_basis`]): the four weights as cubics in the leaf's coordinate.
+    basis: Vec<[[f64; 4]; 4]>,
+    /// Per leaf its scale `2^d` onto its coordinate.
+    scales: Vec<f32>,
+    /// Per leaf its width in base-segment units, `2^-d`, exact.
+    widths: Vec<f64>,
+    /// How the tangents are chosen.
+    tangents: Tangents,
+}
+
+/// The basis of a leaf whose tangent shares are `r₀ = h / (x_{k+1} − x_{k−1})` and
+/// `r₁ = h / (x_{k+2} − x_k)`, `h` its width: row `k` holds weight `k`'s coefficients by power of
+/// `t`, `w_k(t) = Σ_j B[k][j] t^j`. It is the non-uniform Catmull–Rom, the cubic Hermite with tangents
+/// `(p_{k+1} − p_{k−1}) / (x_{k+1} − x_{k−1})`: `(−h₁₀ r₀, h₀₀ − h₁₁ r₁, h₀₁ + h₁₀ r₀, h₁₁ r₁)` expanded
+/// in powers. Both shares `½` give the uniform Catmull–Rom, `½ [[0, −1, 2, −1], [2, 0, −5, 3],
+/// [0, 1, 4, −3], [0, 0, −1, 1]]`, every entry exact.
+fn leaf_basis(r0: f64, r1: f64) -> [[f64; 4]; 4] {
+    [
+        [0.0, -r0, 2.0 * r0, -r0],
+        [1.0, 0.0, r1 - 3.0, 2.0 - r1],
+        [0.0, r0, 3.0 - 2.0 * r0, r0 - 2.0],
+        [0.0, 0.0, -r1, r1],
+    ]
 }
 
 /// The deepest refinement a base segment takes: `2^8` leaves.
@@ -112,7 +150,7 @@ impl Knots {
         // Widths in base-segment units, exact: 2^-d.
         let width = |leaf: usize| -> f64 { 1.0 / f64::from(1u32 << depths[owners[leaf].0]) };
         let mut controls = Vec::with_capacity(owners.len());
-        let mut ratio = Vec::with_capacity(owners.len());
+        let mut basis = Vec::with_capacity(owners.len());
         for k in 0..owners.len() {
             let h = width(k);
             // A missing neighbour mirrors the leaf's own width: the end replication.
@@ -128,8 +166,13 @@ impl Knots {
                 (k + 1).min(n - 1),
                 (k + 2).min(n - 1),
             ]);
-            ratio.push([(h / (before + h)) as f32, (h / (h + after)) as f32]);
+            basis.push(leaf_basis(h / (before + h), h / (h + after)));
         }
+        let scales = owners
+            .iter()
+            .map(|&(b, _)| (1u32 << depths[b]) as f32)
+            .collect();
+        let widths = (0..owners.len()).map(width).collect();
         let cells = first_leaf
             .iter()
             .zip(depths)
@@ -141,8 +184,29 @@ impl Knots {
             cells,
             positions,
             controls,
-            ratio,
+            basis,
+            scales,
+            widths,
+            tangents: Tangents::Chord,
         }))
+    }
+
+    /// The same knots with their tangents chosen by `tangents`.
+    #[must_use]
+    pub fn with_tangents(self, tangents: Tangents) -> Self {
+        if self.0.tangents == tangents {
+            return self;
+        }
+        Self(Arc::new(KnotTable {
+            tangents,
+            ..(*self.0).clone()
+        }))
+    }
+
+    /// How the tangents are chosen.
+    #[must_use]
+    pub fn tangents(&self) -> Tangents {
+        self.0.tangents
     }
 
     /// Base knots.
@@ -186,20 +250,29 @@ impl Knots {
         &self.0.controls
     }
 
-    /// Leaf `leaf`'s tangent shares.
-    #[inline(always)]
-    pub(crate) fn leaf_ratio(&self, leaf: usize) -> [f32; 2] {
-        self.0.ratio[leaf]
+    /// Per leaf its basis: weight `k` at the leaf's coordinate `t` is `Σ_j basis[leaf][k][j] t^j`.
+    pub(crate) fn basis(&self) -> &[[[f64; 4]; 4]] {
+        &self.0.basis
     }
 
-    /// The leaf a clamped input reads, its coordinate `t` and the leaf's scale `2^d` onto it: base
-    /// segment `b = min(⌊u⌋, g − 2)` of `u = (x_c + 1) · span` (an input that is not a number takes
-    /// segment 0, as the integer cast did), `s = u − b`, the leaf `c = min(⌊s 2^d⌋, 2^d − 1)` within
-    /// it, `t = s 2^d − c`, every step exact in `f32` for a power-of-two scale. At depth zero this is
-    /// the uniform kernel's segment and coordinate, bit for bit; the uniform knots take that kernel's
-    /// own arithmetic and never call this.
+    /// Per leaf its scale `2^d` onto its coordinate: `dt/dx = span · 2^d`.
+    pub(crate) fn scales(&self) -> &[f32] {
+        &self.0.scales
+    }
+
+    /// Per leaf its width in base-segment units, `2^-d`, exact.
+    pub(crate) fn widths(&self) -> &[f64] {
+        &self.0.widths
+    }
+
+    /// The leaf a clamped input reads and its coordinate `t` on it: base segment
+    /// `b = min(⌊u⌋, g − 2)` of `u = (x_c + 1) · span` (an input that is not a number takes segment 0,
+    /// as the integer cast did), `s = u − b`, the leaf `c = min(⌊s 2^d⌋, 2^d − 1)` within it,
+    /// `t = s 2^d − c`, every step exact in `f32` for a power-of-two scale. At depth zero this is the
+    /// uniform kernel's segment and coordinate, bit for bit; the uniform knots take that kernel's own
+    /// arithmetic and never call this.
     #[inline(always)]
-    pub(crate) fn locate(&self, xc: f32, span: f32) -> (usize, f32, f32) {
+    pub(crate) fn locate(&self, xc: f32, span: f32) -> (usize, f32) {
         let last = (self.0.grid - 2) as f32;
         let u = (xc + 1.0) * span;
         let floor = u.floor();
@@ -208,7 +281,7 @@ impl Knots {
         let (first, cells) = self.0.cells[b as usize];
         let scaled = s * cells;
         let cell = scaled.floor().clamp(0.0, cells - 1.0);
-        (first as usize + cell as usize, scaled - cell, cells)
+        (first as usize + cell as usize, scaled - cell)
     }
 
     /// The refinement whose leaves follow `samples`' mass: base segment `b` takes depth
@@ -227,7 +300,7 @@ impl Knots {
         let mut counts = vec![0usize; grid - 1];
         let mut total = 0usize;
         for &x in samples.iter().filter(|x| !x.is_nan()) {
-            let (leaf, _, _) = uniform.locate(x.clamp(-1.0, 1.0), span);
+            let (leaf, _) = uniform.locate(x.clamp(-1.0, 1.0), span);
             counts[leaf] += 1;
             total += 1;
         }

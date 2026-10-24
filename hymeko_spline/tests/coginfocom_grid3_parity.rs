@@ -213,6 +213,7 @@ fn grid3_matches_the_recovered_pytorch_evaluator() {
     let mut checked_out = 0usize;
     let mut checked_gx = 0usize;
     let mut checked_gc = 0usize;
+    let mut worst_out = 0i64;
     let mut worst_gx = 0.0f64;
     let mut worst_gc = 0.0f64;
 
@@ -226,12 +227,13 @@ fn grid3_matches_the_recovered_pytorch_evaluator() {
         );
         let back = catmull_rom_backward(&c.coef, &cache, &c.grad_y);
 
-        // Forward: bit identity, asserted — not a tolerance.
+        // Forward: within FORWARD_ULP_BOUND (bit identity until the power form, 2026-10-23).
         for (k, (&got, &want)) in out.iter().zip(&c.y).enumerate() {
-            assert_eq!(
-                got.to_bits(),
-                want.to_bits(),
-                "{}: forward lane {k} — rust {got:e} vs torch {want:e}",
+            let u = ulps(got, want);
+            worst_out = worst_out.max(u);
+            assert!(
+                u <= FORWARD_ULP_BOUND,
+                "{}: forward lane {k} — {u} ulp (rust {got:e} vs torch {want:e})",
                 c.name
             );
             checked_out += 1;
@@ -263,7 +265,7 @@ fn grid3_matches_the_recovered_pytorch_evaluator() {
     assert_eq!(checked_gx, 105, "grad_x coordinates compared");
     assert_eq!(checked_gc, 36, "grad_coef coordinates compared");
     println!(
-        "grid3 parity: forward bit-identical; worst grad_x={worst_gx} ulp, grad_coef={worst_gc} ulp"
+        "grid3 parity: worst forward={worst_out} ulp, grad_x={worst_gx} ulp, grad_coef={worst_gc} ulp"
     );
 }
 
@@ -366,18 +368,26 @@ fn the_ulp_metric_is_monotonic_across_zero() {
 
 /// Gradient agreement bound, **derived from the measurement below, not chosen in advance**.
 ///
-/// The forward pass agrees **bit-for-bit** on all 105 coordinates, so no tolerance applies there and
-/// none is granted. The gradients do not, and the reason is structural rather than sloppy: the
+/// The gradients do not agree bit for bit, and the reason is structural rather than sloppy: the
 /// Catmull–Rom derivative weights sum to zero (the spline reproduces constants exactly), so `grad_x`
 /// is a *cancelling* four-term sum. Cancellation amplifies the relative round-off of the summands,
 /// and PyTorch reaches the same quantity through a different operation graph — autograd through
 /// `clamp`, `floor`, `sub` and four separate gathers — than the closed-form derivative Rust
-/// evaluates. Measured worst case: **15 ulp** on `grad_x`, **2 ulp** on `grad_coef`.
+/// evaluates. Measured worst case: **15 ulp** on `grad_x`, **2 ulp** on `grad_coef` (2026-08); with the power form
+/// (2026-10-23) **14 ulp** and **8 ulp**.
 ///
 /// The bound is the next power of two above the measured worst case. `measure_error_distribution`
 /// reports the live distribution, and `a_materially_wrong_implementation_is_rejected` shows the
 /// bound is far too tight to admit a wrong implementation.
 const GRAD_ULP_BOUND: i64 = 16;
+
+/// Forward agreement bound. Until 2026-10-23 the forward agreed **bit for bit** on all 105 coordinates and no
+/// tolerance was granted. The power form (user decision "Do it", Nagare plan 2026-10-23-incidence-partition,
+/// Amendment 7; the 10-21 rule that bit identity is a means, judged by tolerance where it blocks a structural speed-up)
+/// evaluates each leaf's cubic by Horner from `a = Bᵀ q`, which rounds differently from the four-term weighted sum
+/// torch evaluates. Measured: 64 of 105 coordinates still bit-identical, worst **7 ulp** (absolute 4.8e-7). The bound
+/// is the next power of two above it; the controls below break by orders of magnitude more.
+const FORWARD_ULP_BOUND: i64 = 8;
 
 #[test]
 fn measure_error_distribution() {
@@ -478,9 +488,10 @@ fn reference_cr(coef: &[f32], x: f32, grid: usize, padding: Padding, reversed: b
     (0..4).map(|k| w[k] * coef[p[k]]).sum()
 }
 
-/// The reference itself must be right, or the controls below prove nothing.
+/// The reference itself must be right, or the controls below prove nothing: it reproduces the operator within the
+/// forward bound (bit for bit until the power form, 2026-10-23).
 #[test]
-fn the_reference_reproduces_the_operator_bit_for_bit_under_replication() {
+fn the_reference_reproduces_the_operator_under_replication() {
     for c in cases() {
         let (out, _) = catmull_rom_forward(
             &c.coef,
@@ -499,7 +510,12 @@ fn the_reference_reproduces_the_operator_bit_for_bit_under_replication() {
                     Padding::Replicate,
                     false,
                 );
-                assert_eq!(got.to_bits(), out[k].to_bits(), "{}: lane {k}", c.name);
+                assert!(
+                    ulps(got, out[k]) <= FORWARD_ULP_BOUND,
+                    "{}: lane {k}: {got:e} vs {:e}",
+                    c.name,
+                    out[k]
+                );
             }
         }
     }

@@ -20,6 +20,8 @@ fn control(knots: &Knots, channels: usize) -> Vec<f32> {
         .collect()
 }
 
+/// The bit patterns, for the thread-count test (the one reader, built with `parallel`).
+#[cfg(feature = "parallel")]
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
@@ -173,6 +175,150 @@ fn the_pullback_matches_central_differences_over_refined_knots() {
             (fd - a).abs() <= 3e-3 * fd.abs().max(1.0),
             "coef[{j}]: {fd} vs {a}"
         );
+    }
+}
+
+/// The non-uniform Catmull–Rom on a leaf of tangent shares `(r₀, r₁)` at `t`, in `f64`: the Hermite form's weights
+/// `(−h₁₀ r₀, h₀₀ − h₁₁ r₁, h₀₁ + h₁₀ r₀, h₁₁ r₁)` and their `t`-derivatives.
+fn hermite(t: f64, (r0, r1): (f64, f64)) -> ([f64; 4], [f64; 4]) {
+    let (t2, t3) = (t * t, t * t * t);
+    let (h00, h10, h01, h11) = (
+        2.0 * t3 - 3.0 * t2 + 1.0,
+        t3 - 2.0 * t2 + t,
+        -2.0 * t3 + 3.0 * t2,
+        t3 - t2,
+    );
+    let (d00, d10, d01, d11) = (
+        6.0 * t2 - 6.0 * t,
+        3.0 * t2 - 4.0 * t + 1.0,
+        -6.0 * t2 + 6.0 * t,
+        3.0 * t2 - 2.0 * t,
+    );
+    (
+        [-h10 * r0, h00 - h11 * r1, h01 + h10 * r0, h11 * r1],
+        [-d10 * r0, d00 - d11 * r1, d01 + d10 * r0, d11 * r1],
+    )
+}
+
+/// The refined spline element by element from its definition ([`hermite_reference`]).
+struct Reference {
+    y: Vec<f64>,
+    grad_x: Vec<f64>,
+    grad_coef: Vec<f64>,
+    /// Each element's `dt/dx = span · 2^d`.
+    dt_dx: Vec<f64>,
+}
+
+/// The refined spline element by element from its definition: each leaf's control points (the ends replicated),
+/// tangent shares `h / (h₋ + h)`, `h / (h + h₊)` (widths `2^-d`, a missing neighbour mirroring the leaf) and scale,
+/// the leaf and coordinate by the `f32` steps `Knots::locate` documents, the weights by [`hermite`] in `f64`; the input
+/// gradient `0` outside `[-1, 1]`.
+fn hermite_reference(
+    (grid, depths): (usize, &[u8]),
+    coef: &[f32],
+    x: &[f32],
+    (g, channels): (&[f32], usize),
+) -> Reference {
+    let leaves: Vec<u8> = depths
+        .iter()
+        .flat_map(|&d| (0..1u32 << d).map(move |_| d))
+        .collect();
+    let points = leaves.len() + 1;
+    let width = |k: usize| 1.0 / f64::from(1u32 << leaves[k]);
+    let span = 0.5 * (grid - 1) as f32;
+    let mut r = Reference {
+        y: vec![0.0; x.len()],
+        grad_x: vec![0.0; x.len()],
+        grad_coef: vec![0.0; coef.len()],
+        dt_dx: vec![0.0; x.len()],
+    };
+    for (e, &raw) in x.iter().enumerate() {
+        let xc = raw.clamp(-1.0, 1.0);
+        let u = (xc + 1.0) * span;
+        let b = u.floor().clamp(0.0, (grid - 2) as f32);
+        let cells = (1u32 << depths[b as usize]) as f32;
+        let scaled = (u - b) * cells;
+        let c = scaled.floor().clamp(0.0, cells - 1.0);
+        let k = depths[..b as usize]
+            .iter()
+            .map(|&d| 1usize << d)
+            .sum::<usize>()
+            + c as usize;
+        let h = width(k);
+        let before = if k == 0 { h } else { width(k - 1) };
+        let after = if k + 1 == leaves.len() {
+            h
+        } else {
+            width(k + 1)
+        };
+        let (w, dw) = hermite(f64::from(scaled - c), (h / (before + h), h / (h + after)));
+        let controls = [
+            k.saturating_sub(1),
+            k,
+            (k + 1).min(points - 1),
+            (k + 2).min(points - 1),
+        ];
+        let base = (e % channels) * points;
+        let q = controls.map(|j| f64::from(coef[base + j]));
+        let ge = f64::from(g[e]);
+        r.dt_dx[e] = f64::from(span) * f64::from(cells);
+        r.y[e] = (0..4).map(|i| w[i] * q[i]).sum();
+        if (-1.0..=1.0).contains(&raw) {
+            let slope: f64 = (0..4).map(|i| dw[i] * q[i]).sum();
+            r.grad_x[e] = ge * slope * r.dt_dx[e];
+        }
+        for (i, &j) in controls.iter().enumerate() {
+            r.grad_coef[base + j] += ge * w[i];
+        }
+    }
+    r
+}
+
+/// The largest `|got − want| / scale(e)` over the elements.
+fn gap(got: &[f32], want: &[f64], scale: impl Fn(usize) -> f64) -> f64 {
+    got.iter()
+        .zip(want)
+        .enumerate()
+        .map(|(e, (&a, &b))| (f64::from(a) - b).abs() / scale(e))
+        .fold(0.0, f64::max)
+}
+
+/// **The power form is the Hermite weights over refined knots** (Nagare plan 2026-10-23-incidence-partition,
+/// Amendment 7): each leaf's cubic by Horner from coefficients computed once per call, and the control gradient folded
+/// from per-leaf moments through the leaf's basis, agree with the per-element Hermite weights ([`hermite_reference`])
+/// over knots of several depths (the deepest 8), inputs a sixth outside the clamp interval: the output to `2e-6` of
+/// the control points' magnitude, the input gradient to `2e-6` of `|g|max · |q|max · dt/dx` at the element's leaf, the
+/// control gradient to `1e-5` of its largest entry.
+#[test]
+fn the_power_form_is_the_hermite_weights_over_refined_knots() {
+    let cases: [(usize, &[u8]); 4] = [
+        (6, &[0, 1, 2, 1, 0]),
+        (4, &[3, 0, 1]),
+        (5, &[0, 8, 0, 2]),
+        (3, &[2, 5]),
+    ];
+    let (n, channels) = (700, 3);
+    for (grid, depths) in cases {
+        let knots = Knots::refined(grid, depths);
+        let coef = control(&knots, channels);
+        let x: Vec<f32> = (0..n * channels)
+            .map(|i| (i as f32 * 0.618_034).fract() * 2.4 - 1.2)
+            .collect();
+        let g: Vec<f32> = (0..x.len()).map(|i| (i as f32 * 0.37).sin()).collect();
+        let (y, cache) = catmull_rom_forward(&coef, &x, n, channels, &knots);
+        let back = catmull_rom_backward(&coef, &cache, &g);
+        let want = hermite_reference((grid, depths), &coef, &x, (&g, channels));
+        let largest = |v: &[f32]| f64::from(v.iter().fold(0.0f32, |m, v| m.max(v.abs())));
+        let (q, reach) = (largest(&coef), largest(&coef) * largest(&g));
+        let top = want.grad_coef.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let (dy, dx, dc) = (
+            gap(&y, &want.y, |_| q),
+            gap(&back.grad_x, &want.grad_x, |e| reach * want.dt_dx[e]),
+            gap(&back.grad_coef, &want.grad_coef, |_| top),
+        );
+        assert!(dy <= 2e-6, "{depths:?}: output {dy:e}");
+        assert!(dx <= 2e-6, "{depths:?}: input gradient {dx:e}");
+        assert!(dc <= 1e-5, "{depths:?}: control gradient {dc:e}");
     }
 }
 

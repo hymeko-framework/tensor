@@ -13,6 +13,12 @@
 //! and the input gradient keep the `87116b6` fingerprints. The one-element shape keeps all five,
 //! since a single term has no order.
 //!
+//! **Re-pinned on 2026-10-23, output, input gradient and coefficient gradient** (user decision:
+//! "Do it"; Nagare plan 2026-10-23-incidence-partition, Amendment 7): the power form evaluates each
+//! leaf's cubic by Horner from coefficients computed once per call, and accumulates moments folded
+//! through the leaf basis; the cache keeps its fingerprints. The one-element shape moves too: its
+//! single term is now a different expression, not a different order.
+//!
 //! No retired body is copied into the test tree: the oracle is the recorded bytes.
 
 use hymeko_spline::{catmull_rom_backward, catmull_rom_forward, PAR_MIN_ELEMS};
@@ -51,43 +57,43 @@ const SHAPES: [(usize, usize, usize); 5] = [
     (2003, 32, 6),
 ];
 
-/// The fingerprints of `(out, x_clamped, interior, grad_x, grad_coef)` per shape, recorded at
-/// `87116b6`.
+/// The fingerprints of `(out, x_clamped, interior, grad_x, grad_coef)` per shape: the cache's two
+/// recorded at `87116b6`, the other three on 2026-10-23 (the power form).
 const RECORDED: [[u64; 5]; 5] = [
     [
-        0x55dd_5831_cba5_f277,
+        0xe828_5c3a_1b23_0d5a,
         0xd9cc_4926_3773_0386,
         0xad2a_ca77_4798_5764,
-        0x35a3_3e99_6982_7052,
-        0x7d80_c00b_cbeb_92af,
+        0xb659_0c7f_7bbe_1975,
+        0x4f26_ee56_5f86_74cc,
     ],
     [
-        0x7ad8_e7f5_e6f8_e42f,
+        0xff32_3701_21a8_37e0,
         0x0928_766a_74cc_3a07,
         0xdd19_2b39_5c64_5995,
-        0x3f03_3da1_3ae4_7dfd,
-        0xd69b_cc2f_eb81_3258,
+        0x11dc_3103_0722_2fe1,
+        0x7fb9_dda2_544a_d83b,
     ],
     [
-        0xf87c_0ff7_5e6c_8c8d,
+        0xfd37_93ed_6fc2_7b62,
         0xd7b7_fbf8_935a_f5ae,
         0xcee0_b8a0_9342_0275,
-        0x0ee0_6894_60ad_f820,
-        0x6ccc_2388_c0df_cab6,
+        0xd756_fc96_0df9_4b00,
+        0xa322_b9d5_7820_aeac,
     ],
     [
-        0x172e_3169_7fd6_8aed,
+        0x2706_8754_e128_4475,
         0x807b_f26a_d1c6_3fcb,
         0x51bd_a1e5_a365_4e25,
-        0x4d3a_e248_571c_8f9b,
-        0x5fad_5be1_6f5c_ab27,
+        0xc1dc_65f2_d990_8004,
+        0x20a6_8a10_c6b5_e2f1,
     ],
     [
-        0x7171_3298_d1e3_474a,
+        0x9489_d4fb_a588_9488,
         0x360c_bac4_abe7_0a57,
         0xd74c_ba22_0e56_8c55,
-        0x8103_3990_958b_096b,
-        0x81e9_894b_e32d_b17d,
+        0xb4a7_de24_29f0_2d43,
+        0x1013_3575_bb6b_f7b6,
     ],
 ];
 

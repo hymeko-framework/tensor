@@ -57,5 +57,5 @@ pub use catmull_rom::{
     CatmullRomBuffers, CatmullRomCache, ChebyshevCrBackward, RoutedBuffers, RoutedCotangents,
     PAR_MIN_ELEMS, SKIP,
 };
-pub use knots::Knots;
+pub use knots::{Knots, Tangents};
 pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};

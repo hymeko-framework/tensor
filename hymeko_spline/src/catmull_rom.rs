@@ -37,11 +37,28 @@
 //! decoration: the 2026-07-16 record has a dense layer going from 21.4 ms at one
 //! thread to 133.3 ms at 18 — a 6x regression from splitting 120 rows across
 //! workers. Small shapes must stay sequential.
+//!
+//! # The power form
+//!
+//! On every leaf `ℓ` the four weights are a cubic in the local coordinate, `w(t) = B_ℓ τ(t)` with
+//! `τ = (1, t, t², t³)` and `B_ℓ` the leaf's basis ([`Knots`]), so a channel's spline on that leaf is
+//! one cubic in `t` (Nagare plan 2026-10-23-incidence-partition, Amendment 7). For the leaf's four
+//! control values `q`:
+//!
+//! * the value is `a₀ + t(a₁ + t(a₂ + t a₃))` with `a = B_ℓᵀ q`;
+//! * the input derivative is `β₁ + t(β₂ + t β₃)` with `β = s_ℓ (a₁, 2a₂, 3a₃)` and `s_ℓ = dt/dx =
+//!   span · 2^d`;
+//! * the control gradient is `B_ℓ m` with the moments `m = Σ_e g_e τ(t_e)` of the leaf's elements.
+//!
+//! `a` and `β` are computed in `f64` and rounded to `f32` once per bank, channel and leaf per call;
+//! the moments accumulate per leaf and map through `B_ℓ` once per block. Nothing per element depends
+//! on the knot count or the knot placement. Plain `*` and `+` throughout, no fused multiply-add, so
+//! every target gives the same bits.
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::knots::Knots;
+use crate::knots::{Knots, Tangents};
 
 /// Row-parallelism is used only when `n * channels` reaches this many elements.
 ///
@@ -175,62 +192,234 @@ fn segment(xc: f32, span: f32, last: f32) -> (f32, f32) {
 /// Elements per run of the two-pass kernels: what the first pass writes for a run stays in L1.
 const RUN: usize = 256;
 
-/// The first pass's values for a run of up to [`RUN`] elements: each element's segment index, its four
-/// weights and, for the pullback, their four derivatives. The first pass computes them for the
-/// whole run at once and vectorises; the second reads them beside the per-channel tables, which
-/// it indexes by channel and segment and which do not vectorise.
+/// The first pass's values for a run of up to [`RUN`] elements: each element's leaf and its coordinate
+/// `t` on it. The first pass locates the whole run at once and vectorises; the second reads them
+/// beside the per-channel tables, which it indexes by channel and leaf and which do not vectorise.
 struct ElementPass {
     segment: [u32; RUN],
-    weights: [[f32; RUN]; 4],
-    dweights: [[f32; RUN]; 4],
-    /// Each element's leaf scale `2^d` onto its `t` (refined knots; `1` over uniform ones).
-    scale: [f32; RUN],
+    t: [f32; RUN],
 }
 
 impl ElementPass {
     fn new() -> Self {
         Self {
             segment: [0; RUN],
-            weights: [[0.0; RUN]; 4],
-            dweights: [[0.0; RUN]; 4],
-            scale: [1.0; RUN],
+            t: [0.0; RUN],
         }
     }
 }
 
-/// Each segment of each channel with what an element in it reads (Nagare plan
-/// 2026-10-08-orthtree-hypergraph-convolution, Amendment 1): the four control values, gathered once
-/// per call instead of once per element, and the four control indices the coefficient gradient
-/// accumulates into.
+/// The leaf of a clamped input and its coordinate on it: uniform knots by the uniform segment
+/// arithmetic ([`segment`]), which vectorises, refined ones by [`Knots::locate`]. The one expression
+/// the forward evaluates and the backward recomputes from the tape.
 ///
-/// # Invariants
-/// `quads[ch · (grid − 1) + i][k] == coef[ch · grid + controls[i][k]]` and
-/// `controls[i] == cr_control_indices(i, grid)` for every channel `ch` and segment `i ≤ grid − 2`:
-/// the values and indices the per-element expressions read, so every result is unchanged bit for
-/// bit.
-struct Segments {
-    quads: Vec<[f32; 4]>,
-    controls: Vec<[usize; 4]>,
+/// # Preconditions
+/// As [`segment`] and [`Knots::locate`]: `span == 0.5 · (grid − 1)`, `last == (grid − 2) as f32`;
+/// `UNIFORM` exactly when `knots.is_uniform()`.
+#[inline(always)]
+fn leaf_of<const UNIFORM: bool>(knots: &Knots, xc: f32, (span, last): (f32, f32)) -> (u32, f32) {
+    if UNIFORM {
+        let (i, t) = segment(xc, span, last);
+        (i as u32, t)
+    } else {
+        let (leaf, t) = knots.locate(xc, span);
+        (leaf as u32, t)
+    }
 }
 
-impl Segments {
-    /// The table of `coef`, `channels × knots.len()`, by leaf.
+/// Each leaf of each channel of one bank as the polynomial an element on it evaluates (Nagare plan
+/// 2026-10-23-incidence-partition, Amendment 7), computed once per call: the forward's power
+/// coefficients ([`Polys`]) or the pullback's slope coefficients ([`Slopes`]).
+///
+/// # Invariants
+/// `table[ch · leaves + ℓ]` is channel `ch`'s entry on leaf `ℓ`, `leaves == knots.controls().len()`; `bases` the leaf
+/// bases the entries were computed through, which the pullback's fold reads again.
+struct Segments<C> {
+    table: Vec<C>,
+    leaves: usize,
+    bases: LeafBases,
+}
+
+/// The basis each leaf of each channel maps its four control values through, `a_j = Σ_k B[k][j] q_k`, laid out
+/// `bases[ch · stride + ℓ]`: under [`Tangents::Chord`] the knots' own per leaf, shared by every channel (`stride` 0);
+/// under [`Tangents::Bounded`] one per channel and leaf, the Hermite basis of the tangents its knots select (Nagare
+/// plan 2026-10-23-c1-lattice-activations, Amendment 1). One indexing for both, no branch at a read.
+struct LeafBases {
+    bases: Vec<[[f64; 4]; 4]>,
+    stride: usize,
+}
+
+impl LeafBases {
+    /// The bases of `coef`, `channels × knots.len()`, under the knots' tangent rule: one choice per call.
+    fn of(coef: &[f32], channels: usize, knots: &Knots) -> Self {
+        match knots.tangents() {
+            Tangents::Chord => Self {
+                bases: knots.basis().to_vec(),
+                stride: 0,
+            },
+            Tangents::Bounded => Self {
+                bases: coef
+                    .chunks_exact(knots.len())
+                    .take(channels)
+                    .flat_map(|channel| bounded_bases(channel, knots))
+                    .collect(),
+                stride: knots.controls().len(),
+            },
+        }
+    }
+
+    /// Channel `ch`'s basis on leaf `leaf`.
+    #[inline(always)]
+    fn get(&self, (ch, leaf): (usize, usize)) -> &[[f64; 4]; 4] {
+        &self.bases[ch * self.stride + leaf]
+    }
+}
+
+/// `1` where `condition` holds, `0` where it does not: a comparison as a weight, not a branch.
+#[inline(always)]
+fn indicator(condition: bool) -> f64 {
+    f64::from(u8::from(condition))
+}
+
+/// Each knot's selection under [`Tangents::Bounded`], as weights on its three candidates (chord, three times the
+/// left secant, three times the right one), with no data-dependent branch:
+/// - the class of the knot in the signed knot graph is the weight `agree = [s_left · s_right > 0]`, zero at a knot
+///   whose secants differ in sign or where one is zero;
+/// - the route is a one-hot over the candidates, the least magnitude winning and the earlier on a tie.
+///
+/// An end knot reads its one edge on both sides, so its chord (half that secant) always wins.
+fn selections(channel: &[f32], widths: &[f64]) -> Vec<[f64; 3]> {
+    let n = channel.len();
+    let q = |k: usize| f64::from(channel[k]);
+    let secant: Vec<f64> = (0..n - 1).map(|l| (q(l + 1) - q(l)) / widths[l]).collect();
+    (0..n)
+        .map(|k| {
+            let (left, right) = (k.max(1) - 1, k.min(n - 2));
+            let (s_left, s_right) = (secant[left], secant[right]);
+            let chord =
+                (q((k + 1).min(n - 1)) - q(k.saturating_sub(1))) / (widths[left] + widths[right]);
+            let (c, l, r) = (chord.abs(), 3.0 * s_left.abs(), 3.0 * s_right.abs());
+            let agree = indicator(s_left * s_right > 0.0);
+            let take_chord = indicator(c <= l && c <= r);
+            let take_left = (1.0 - take_chord) * indicator(l <= r);
+            let take_right = (1.0 - take_chord) * (1.0 - indicator(l <= r));
+            [agree * take_chord, agree * take_left, agree * take_right]
+        })
+        .collect()
+}
+
+/// One channel's basis per leaf under [`Tangents::Bounded`]: the cubic Hermite in powers,
+/// `a = P (q_ℓ, q_{ℓ+1}, d_ℓ, d_{ℓ+1})`, whose tangents `d` (in the leaf's coordinate) are the selection-weighted sums
+/// of the candidates' linear functionals over the leaf's window `(q_{ℓ−1}, q_ℓ, q_{ℓ+1}, q_{ℓ+2})` (ends replicated,
+/// as the controls). One formula for every leaf: where both knots select the chord it is the knots' own basis,
+/// entry by entry.
+fn bounded_bases(channel: &[f32], knots: &Knots) -> Vec<[[f64; 4]; 4]> {
+    let widths = knots.widths();
+    let pick = selections(channel, widths);
+    let last = widths.len() - 1;
+    (0..widths.len())
+        .map(|leaf| {
+            let w = widths[leaf];
+            let (before, after) = (widths[leaf.saturating_sub(1)], widths[(leaf + 1).min(last)]);
+            let (r0, r1) = (w / (before + w), w / (w + after));
+            let ([c0, l0, g0], [c1, l1, g1]) = (pick[leaf], pick[leaf + 1]);
+            // The tangents over the window: chord, left and right candidates, each weighted by its selection.
+            let d0 = [
+                c0 * -r0 + l0 * (-3.0 * w / before),
+                l0 * (3.0 * w / before) + g0 * -3.0,
+                c0 * r0 + g0 * 3.0,
+                0.0,
+            ];
+            let d1 = [
+                0.0,
+                c1 * -r1 + l1 * -3.0,
+                l1 * 3.0 + g1 * (-3.0 * w / after),
+                c1 * r1 + g1 * (3.0 * w / after),
+            ];
+            let (q0, q1) = ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]);
+            // a0 = q0, a1 = d0, a2 = −3 q0 + 3 q1 − 2 d0 − d1, a3 = 2 q0 − 2 q1 + d0 + d1.
+            std::array::from_fn(|k| {
+                [
+                    q0[k],
+                    d0[k],
+                    -3.0 * q0[k] + 3.0 * q1[k] - 2.0 * d0[k] - d1[k],
+                    2.0 * q0[k] - 2.0 * q1[k] + d0[k] + d1[k],
+                ]
+            })
+        })
+        .collect()
+}
+
+/// Per channel and leaf the power coefficients `a = B_ℓᵀ q` of the value: `y = a₀ + t(a₁ + t(a₂ + t a₃))`.
+type Polys = Segments<[f32; 4]>;
+
+/// Per channel and leaf the coefficients `β = s_ℓ (a₁, 2a₂, 3a₃)` of the input derivative, `s_ℓ = dt/dx`:
+/// `dy/dx = β₁ + t(β₂ + t β₃)`.
+type Slopes = Segments<[f32; 3]>;
+
+impl<C> Segments<C> {
+    /// The table of `coef`, `channels × knots.len()`: per channel and leaf, `entry` of the leaf's index
+    /// and its power coefficients `a_j = Σ_k B_ℓ[k][j] q_k`, summed in `f64` in weight order.
     ///
     /// # Preconditions
     /// `coef.len() == channels · knots.len()`.
-    fn of(coef: &[f32], channels: usize, knots: &Knots) -> Self {
-        let controls: Vec<[usize; 4]> = knots.controls().to_vec();
-        let quads = coef
+    fn of(
+        coef: &[f32],
+        channels: usize,
+        knots: &Knots,
+        entry: impl Fn(usize, [f64; 4]) -> C,
+    ) -> Self {
+        let bases = LeafBases::of(coef, channels, knots);
+        let table = coef
             .chunks_exact(knots.len())
             .take(channels)
-            .flat_map(|channel| controls.iter().map(move |c| c.map(|j| channel[j])))
+            .enumerate()
+            .flat_map(|(ch, channel)| {
+                let (bases, entry) = (&bases, &entry);
+                knots
+                    .controls()
+                    .iter()
+                    .enumerate()
+                    .map(move |(leaf, controls)| {
+                        let b = bases.get((ch, leaf));
+                        let q = controls.map(|j| f64::from(channel[j]));
+                        let a = std::array::from_fn(|j| {
+                            b[0][j] * q[0] + b[1][j] * q[1] + b[2][j] * q[2] + b[3][j] * q[3]
+                        });
+                        entry(leaf, a)
+                    })
+            })
             .collect();
-        Self { quads, controls }
+        Self {
+            table,
+            leaves: knots.controls().len(),
+            bases,
+        }
+    }
+}
+
+impl Polys {
+    /// The forward's table: each leaf's `a`, rounded to `f32`.
+    fn values(coef: &[f32], channels: usize, knots: &Knots) -> Self {
+        Self::of(coef, channels, knots, |_, a| a.map(|v| v as f32))
     }
 
-    /// Channel `ch`'s four control values in segment `i`.
-    fn quad(&self, ch: usize, i: usize) -> [f32; 4] {
-        self.quads[ch * self.controls.len() + i]
+    /// Channel `ch`'s power coefficients on leaf `leaf`.
+    #[inline(always)]
+    fn at(&self, ch: usize, leaf: usize) -> [f32; 4] {
+        self.table[ch * self.leaves + leaf]
+    }
+}
+
+impl Slopes {
+    /// The pullback's table: each leaf's `β`, the scale `s_ℓ = span · 2^d` folded in, in `f64`, then
+    /// rounded to `f32`.
+    fn slopes(coef: &[f32], channels: usize, knots: &Knots) -> Self {
+        let span = 0.5 * (knots.grid() - 1) as f64;
+        Self::of(coef, channels, knots, |leaf, a| {
+            let s = span * f64::from(knots.scales()[leaf]);
+            [s * a[1], s * (2.0 * a[2]), s * (3.0 * a[3])].map(|v| v as f32)
+        })
     }
 }
 
@@ -264,23 +453,23 @@ struct EmitRun<'p> {
     first: usize,
     channels: usize,
     seg: &'p [u32],
-    weights: [&'p [f32]; 4],
+    t: &'p [f32],
 }
 
 /// How a forward's second pass writes a run: every bank into its own output ([`AllBanks`]), or each element's
 /// routed bank alone into one ([`RoutedBank`]). Monomorphized into the row kernel, so neither carries a choice
 /// inside its element loop.
 trait ForwardEmit {
-    /// Writes the run from its segments and weights; returns the channel after the run.
-    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize;
+    /// Writes the run from its leaves and coordinates; returns the channel after the run.
+    fn emit(&mut self, banks: &[Polys], run: &EmitRun<'_>) -> usize;
 }
 
-/// One element's value on one bank: its four weights against its channel's and segment's control values.
+/// One element's value on one bank: its channel's cubic on its leaf, by Horner at its coordinate.
 #[inline(always)]
-fn element_value(segments: &Segments, ch: usize, run: &EmitRun<'_>, e: usize) -> f32 {
-    let c = segments.quad(ch, run.seg[e] as usize);
-    let [w0, w1, w2, w3] = run.weights;
-    w0[e] * c[0] + w1[e] * c[1] + w2[e] * c[2] + w3[e] * c[3]
+fn element_value(polys: &Polys, ch: usize, run: &EmitRun<'_>, e: usize) -> f32 {
+    let [a0, a1, a2, a3] = polys.at(ch, run.seg[e] as usize);
+    let t = run.t[e];
+    a0 + t * (a1 + t * (a2 + t * a3))
 }
 
 /// Every bank's output slice over the block.
@@ -290,14 +479,14 @@ struct AllBanks<'a, 'b> {
 
 impl ForwardEmit for AllBanks<'_, '_> {
     #[inline(always)]
-    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize {
+    fn emit(&mut self, banks: &[Polys], run: &EmitRun<'_>) -> usize {
         let n = run.seg.len();
         let mut ch = run.first;
-        for (segments, out) in banks.iter().zip(self.outs.iter_mut()) {
+        for (polys, out) in banks.iter().zip(self.outs.iter_mut()) {
             let out = &mut out[run.start..run.start + n];
             ch = run.first;
             for (e, slot) in out.iter_mut().enumerate() {
-                *slot = element_value(segments, ch, run, e);
+                *slot = element_value(polys, ch, run, e);
                 ch += 1;
                 if ch == run.channels {
                     ch = 0;
@@ -316,7 +505,7 @@ struct RoutedBank<'a> {
 
 impl ForwardEmit for RoutedBank<'_> {
     #[inline(always)]
-    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize {
+    fn emit(&mut self, banks: &[Polys], run: &EmitRun<'_>) -> usize {
         let n = run.seg.len();
         let route = &self.route[run.start..run.start + n];
         let out = &mut self.out[run.start..run.start + n];
@@ -324,7 +513,7 @@ impl ForwardEmit for RoutedBank<'_> {
         for (e, (slot, &bank)) in out.iter_mut().zip(route).enumerate() {
             *slot = banks
                 .get(usize::from(bank))
-                .map_or(0.0, |segments| element_value(segments, ch, run, e));
+                .map_or(0.0, |polys| element_value(polys, ch, run, e));
             ch += 1;
             if ch == run.channels {
                 ch = 0;
@@ -345,7 +534,7 @@ struct EveryAndRouted<'a> {
 
 impl ForwardEmit for EveryAndRouted<'_> {
     #[inline(always)]
-    fn emit(&mut self, banks: &[Segments], run: &EmitRun<'_>) -> usize {
+    fn emit(&mut self, banks: &[Polys], run: &EmitRun<'_>) -> usize {
         let n = run.seg.len();
         let span = run.start..run.start + n;
         let (every, route, out) = (
@@ -361,7 +550,7 @@ impl ForwardEmit for EveryAndRouted<'_> {
             *every_slot = element_value(&first[0], ch, run, e);
             *slot = routed
                 .get(usize::from(bank))
-                .map_or(0.0, |segments| element_value(segments, ch, run, e));
+                .map_or(0.0, |polys| element_value(polys, ch, run, e));
             ch += 1;
             if ch == run.channels {
                 ch = 0;
@@ -386,10 +575,11 @@ struct ForwardRow<'a, E> {
 ///
 /// One pass over runs of elements in row-major order, the channel a counter that wraps (not
 /// `element % channels`, which measured ~24 % slower): no per-row iterator setup, which at one
-/// channel cost as much as the arithmetic. Each run is two passes: the clamp, the segment and the
-/// weights of every element at once, then, bank by bank, the control values by channel and segment.
-/// The first pass is the banks' one (tensor plan 2026-10-22-cr-banks): banks over one input share
-/// their segments and weights, and write one tape.
+/// channel cost as much as the arithmetic. Each run is two passes: the clamp, the leaf and the
+/// coordinate of every element at once, then, bank by bank, each element's cubic by Horner from the
+/// bank's power coefficients by channel and leaf. The first pass is the banks' one (tensor plan
+/// 2026-10-22-cr-banks): banks over one input share their leaves and coordinates, and write one
+/// tape.
 ///
 /// # Preconditions
 /// Every slice in `w` has the same length as `x_block`, which is a whole multiple
@@ -397,7 +587,7 @@ struct ForwardRow<'a, E> {
 /// coefficients.
 #[inline(always)]
 fn forward_block<const UNIFORM: bool, E: ForwardEmit>(
-    banks: &[Segments],
+    banks: &[Polys],
     knots: &Knots,
     channels: usize,
     x_block: &[f32],
@@ -411,44 +601,25 @@ fn forward_block<const UNIFORM: bool, E: ForwardEmit>(
         let end = (start + RUN).min(x_block.len());
         let n = end - start;
         let x = &x_block[start..end];
-        let ElementPass {
-            segment: seg,
-            weights: [w0, w1, w2, w3],
-            ..
-        } = &mut pass;
-        let (seg, w0, w1, w2, w3) = (
-            &mut seg[..n],
-            &mut w0[..n],
-            &mut w1[..n],
-            &mut w2[..n],
-            &mut w3[..n],
-        );
+        let ElementPass { segment: seg, t } = &mut pass;
+        let (seg, t) = (&mut seg[..n], &mut t[..n]);
         let (x_clamped, interior) = (&mut w.x_clamped[start..end], &mut w.interior[start..end]);
-        // First pass, every element of the run at once: the clamp, the segment and the weights.
+        // First pass, every element of the run at once: the clamp, the leaf and the coordinate.
         for e in 0..n {
             let raw = x[e];
             let xc = raw.clamp(-1.0, 1.0);
-            let (leaf, weights) = if UNIFORM {
-                let (i, t) = segment(xc, span, last);
-                (i as u32, cr_weights(t))
-            } else {
-                let (leaf, t, _) = knots.locate(xc, span);
-                (leaf as u32, refined_weights(knots, leaf, t))
-            };
-            (w0[e], w1[e], w2[e], w3[e]) = (weights[0], weights[1], weights[2], weights[3]);
-            seg[e] = leaf;
+            (seg[e], t[e]) = leaf_of::<UNIFORM>(knots, xc, (span, last));
             x_clamped[e] = xc;
             // Closed interval: `±1` is interior, matching the guard this replaces.
             interior[e] = (-1.0..=1.0).contains(&raw);
         }
-        // Second pass: each element's four control values, by its channel and segment, on every bank or on its
-        // routed bank alone.
+        // Second pass: each element's cubic, by its channel and leaf, on every bank or on its routed bank alone.
         let run = EmitRun {
             start,
             first: ch,
             channels,
             seg: &*seg,
-            weights: [&*w0, &*w1, &*w2, &*w3],
+            t: &*t,
         };
         ch = w.emit.emit(banks, &run);
     }
@@ -458,7 +629,7 @@ fn forward_block<const UNIFORM: bool, E: ForwardEmit>(
 /// which vectorises; refined ones locate their leaves. One choice per call, never per element.
 #[inline(always)]
 fn forward_block_over<E: ForwardEmit>(
-    banks: &[Segments],
+    banks: &[Polys],
     knots: &Knots,
     channels: usize,
     x_block: &[f32],
@@ -545,7 +716,7 @@ pub struct CatmullRomBanksBuffers<'a> {
 }
 
 /// Several banks of control points over one input (tensor plan 2026-10-22-cr-banks): bank `b`'s output
-/// is [`catmull_rom_forward`] of `coefs[b]`, and the clamp, the segment and the weights of every element
+/// is [`catmull_rom_forward`] of `coefs[b]`, and the clamp, the leaf and the coordinate of every element
 /// are computed once for all of them, into one tape.
 ///
 /// # Preconditions
@@ -579,9 +750,9 @@ pub fn catmull_rom_banks_forward_into(
 
     refill(cache, (n, channels), knots);
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let banks: Vec<Segments> = coefs
+    let banks: Vec<Polys> = coefs
         .iter()
-        .map(|coef| Segments::of(coef, channels, knots))
+        .map(|coef| Polys::values(coef, channels, knots))
         .collect();
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
@@ -670,7 +841,7 @@ pub struct RoutedCotangents<'a> {
 /// Several banks of control points over one input, each element evaluated on its routed bank alone (Nagare plan
 /// 2026-10-23-incidence-partition, Amendment 5): element `e` is [`catmull_rom_forward`] of the routed bank at `e`, or
 /// `0` where `route[e] == SKIP`. With `into.every`, the first bank is evaluated on every element into it as well, and
-/// the routes index the banks after it (Amendment 6, H1). The clamp, the segment and the weights are computed once,
+/// the routes index the banks after it (Amendment 6, H1). The clamp, the leaf and the coordinate are computed once,
 /// into the one tape a banks forward writes.
 ///
 /// # Preconditions
@@ -712,9 +883,9 @@ pub fn catmull_rom_routed_forward_into(
         );
     }
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let banks: Vec<Segments> = coefs
+    let banks: Vec<Polys> = coefs
         .iter()
-        .map(|coef| Segments::of(coef, channels, knots))
+        .map(|coef| Polys::values(coef, channels, knots))
         .collect();
     #[cfg(feature = "parallel")]
     if use_parallel(x.len()) {
@@ -765,9 +936,9 @@ fn routed_forward_with_every(
     (knots, cache): (&Knots, &mut CatmullRomCache),
 ) {
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let banks: Vec<Segments> = coefs
+    let banks: Vec<Polys> = coefs
         .iter()
-        .map(|coef| Segments::of(coef, channels, knots))
+        .map(|coef| Polys::values(coef, channels, knots))
         .collect();
     #[cfg(feature = "parallel")]
     if use_parallel(x.len()) {
@@ -823,46 +994,40 @@ struct BackwardChunk<'a, P> {
     pull: &'a P,
     /// The chunk's first element in the cotangents.
     offset: usize,
-    /// Clamped inputs from the forward; the segment is recomputed from them ([`segment`]).
+    /// Clamped inputs from the forward; the leaf and the coordinate are recomputed from them ([`leaf_of`]).
     x_clamped: &'a [f32],
     /// Per-element interior mask from the forward; see [`CatmullRomCache::interior`].
     interior: &'a [bool],
 }
 
-/// One element's pullback on one bank: `gy · w` into its channel's and segment's four accumulator slots, and its
-/// input-gradient term returned -- the clamp's own Jacobian is `1` inside the closed interval and `0` outside, read
-/// from the recorded `interior` mask (not from `x_clamped`, which is inside by construction).
+/// One element's pullback on one bank: its moments `gy · (1, t, t², t³)` into its channel's and leaf's four
+/// accumulator slots, and its input-gradient term `gy · (β₁ + t(β₂ + t β₃))` returned -- the clamp's own Jacobian is
+/// `1` inside the closed interval and `0` outside, read from the recorded `interior` mask (not from `x_clamped`, which
+/// is inside by construction). The moments accumulate for every element, inside or not.
 #[inline(always)]
-fn element_pull<const UNIFORM: bool>(
-    (segments, slots): (&Segments, &mut [f32; 4]),
-    (pass, e, at): (&ElementPass, usize, usize),
+fn element_pull(
+    (slopes, moments): (&Slopes, &mut [f32; 4]),
+    (t, at): (f32, usize),
     gy: f32,
     interior: bool,
-    du_dx: f32,
 ) -> f32 {
-    for (slot, weights) in slots.iter_mut().zip(&pass.weights) {
-        *slot += gy * weights[e];
-    }
+    let g1 = gy * t;
+    let g2 = g1 * t;
+    moments[0] += gy;
+    moments[1] += g1;
+    moments[2] += g2;
+    moments[3] += g2 * t;
     if !interior {
         return 0.0;
     }
-    let c = segments.quads[at];
-    let mut dy_dt = 0.0;
-    for (dweights, &control) in pass.dweights.iter().zip(&c) {
-        dy_dt += dweights[e] * control;
-    }
-    // A leaf at depth `d` is `2^d` times narrower in `u`: `dt/dx = span · 2^d`.
-    if UNIFORM {
-        gy * dy_dt * du_dx
-    } else {
-        gy * dy_dt * (du_dx * pass.scale[e])
-    }
+    let [b1, b2, b3] = slopes.table[at];
+    gy * (b1 + t * (b2 + t * b3))
 }
 
 /// One bank over one run of the backward: its table, its cotangent over the run, the run's interior mask
 /// and first pass, and the bank's accumulators.
 struct BankRun<'a> {
-    segments: &'a Segments,
+    slopes: &'a Slopes,
     grad_y: &'a [f32],
     interior: &'a [bool],
     pass: &'a ElementPass,
@@ -870,25 +1035,23 @@ struct BankRun<'a> {
 }
 
 impl BankRun<'_> {
-    /// The bank's second pass over the run: each element's `gy · w` into its channel's and segment's
+    /// The bank's second pass over the run: each element's moments into its channel's and leaf's
     /// accumulator, and its input-gradient term written (`ASSIGN`) or added into `grad_x`. Returns the
     /// channel counter after the run.
     #[inline(always)]
-    fn pull<const UNIFORM: bool, const ASSIGN: bool>(
+    fn pull<const ASSIGN: bool>(
         self,
         grad_x: &mut [f32],
         (mut ch, channels, segs): (usize, usize, usize),
-        du_dx: f32,
     ) -> usize {
         for (e, (gx, &gy)) in grad_x.iter_mut().zip(self.grad_y).enumerate() {
-            // The element's channel and segment: its accumulator and its control values.
+            // The element's channel and leaf: its accumulator and its slope coefficients.
             let at = ch * segs + self.pass.segment[e] as usize;
-            let term = element_pull::<UNIFORM>(
-                (self.segments, &mut self.accumulators[at]),
-                (self.pass, e, at),
+            let term = element_pull(
+                (self.slopes, &mut self.accumulators[at]),
+                (self.pass.t[e], at),
                 gy,
                 self.interior[e],
-                du_dx,
             );
             if ASSIGN {
                 *gx = term;
@@ -913,7 +1076,6 @@ struct PullRun<'p> {
     first: usize,
     channels: usize,
     segs: usize,
-    du_dx: f32,
 }
 
 /// How a backward's second pass reads its cotangents for a run: every bank's ([`AllCotangents`]), or each element's
@@ -921,9 +1083,9 @@ struct PullRun<'p> {
 trait BackwardPull: Sync {
     /// Accumulates the run into the banks' accumulators (`per_bank` each, bank-major in `accumulators`) and writes its
     /// input gradient into `grad_x`; returns the channel after the run.
-    fn pull<const UNIFORM: bool>(
+    fn pull(
         &self,
-        banks: (&[Segments], &mut [[f32; 4]], usize),
+        banks: (&[Slopes], &mut [[f32; 4]], usize),
         grad_x: &mut [f32],
         run: &PullRun<'_>,
     ) -> usize;
@@ -936,16 +1098,16 @@ struct AllCotangents<'a> {
 
 impl BackwardPull for AllCotangents<'_> {
     #[inline(always)]
-    fn pull<const UNIFORM: bool>(
+    fn pull(
         &self,
-        (banks, accumulators, per_bank): (&[Segments], &mut [[f32; 4]], usize),
+        (banks, accumulators, per_bank): (&[Slopes], &mut [[f32; 4]], usize),
         grad_x: &mut [f32],
         run: &PullRun<'_>,
     ) -> usize {
         let mut ch = run.first;
-        for (b, (segments, grad_y)) in banks.iter().zip(self.grad_ys).enumerate() {
+        for (b, (slopes, grad_y)) in banks.iter().zip(self.grad_ys).enumerate() {
             let bank = BankRun {
-                segments,
+                slopes,
                 grad_y: &grad_y[run.at.clone()],
                 interior: run.interior,
                 pass: run.pass,
@@ -954,9 +1116,9 @@ impl BackwardPull for AllCotangents<'_> {
             // The first bank writes the input gradient, the others add to it: one bank is the
             // single-bank kernel exactly, with no choice inside the element loop.
             ch = if b == 0 {
-                bank.pull::<UNIFORM, true>(grad_x, (run.first, run.channels, run.segs), run.du_dx)
+                bank.pull::<true>(grad_x, (run.first, run.channels, run.segs))
             } else {
-                bank.pull::<UNIFORM, false>(grad_x, (run.first, run.channels, run.segs), run.du_dx)
+                bank.pull::<false>(grad_x, (run.first, run.channels, run.segs))
             };
         }
         ch
@@ -973,9 +1135,9 @@ struct RoutedCotangent<'a> {
 
 impl BackwardPull for RoutedCotangent<'_> {
     #[inline(always)]
-    fn pull<const UNIFORM: bool>(
+    fn pull(
         &self,
-        (banks, accumulators, per_bank): (&[Segments], &mut [[f32; 4]], usize),
+        (banks, accumulators, per_bank): (&[Slopes], &mut [[f32; 4]], usize),
         grad_x: &mut [f32],
         run: &PullRun<'_>,
     ) -> usize {
@@ -984,14 +1146,13 @@ impl BackwardPull for RoutedCotangent<'_> {
         for (e, ((gx, &gy), &bank)) in grad_x.iter_mut().zip(grad_y).zip(route).enumerate() {
             let b = usize::from(bank);
             *gx = match banks.get(b) {
-                Some(segments) => {
+                Some(slopes) => {
                     let at = ch * run.segs + run.pass.segment[e] as usize;
-                    element_pull::<UNIFORM>(
-                        (segments, &mut accumulators[b * per_bank + at]),
-                        (run.pass, e, at),
+                    element_pull(
+                        (slopes, &mut accumulators[b * per_bank + at]),
+                        (run.pass.t[e], at),
                         gy,
                         run.interior[e],
-                        run.du_dx,
                     )
                 }
                 None => 0.0,
@@ -1016,9 +1177,9 @@ struct EveryAndRoutedCotangent<'a> {
 
 impl BackwardPull for EveryAndRoutedCotangent<'_> {
     #[inline(always)]
-    fn pull<const UNIFORM: bool>(
+    fn pull(
         &self,
-        (banks, accumulators, per_bank): (&[Segments], &mut [[f32; 4]], usize),
+        (banks, accumulators, per_bank): (&[Slopes], &mut [[f32; 4]], usize),
         grad_x: &mut [f32],
         run: &PullRun<'_>,
     ) -> usize {
@@ -1036,24 +1197,22 @@ impl BackwardPull for EveryAndRoutedCotangent<'_> {
             .zip(route)
             .enumerate()
         {
-            let at = ch * run.segs + run.pass.segment[e] as usize;
-            let first = element_pull::<UNIFORM>(
+            let (at, t) = (ch * run.segs + run.pass.segment[e] as usize, run.pass.t[e]);
+            let first = element_pull(
                 (&banks[0], &mut accumulators[at]),
-                (run.pass, e, at),
+                (t, at),
                 g_every,
                 run.interior[e],
-                run.du_dx,
             );
             let b = 1 + usize::from(bank);
             *gx = match banks.get(b) {
-                Some(segments) => {
+                Some(slopes) => {
                     first
-                        + element_pull::<UNIFORM>(
-                            (segments, &mut accumulators[b * per_bank + at]),
-                            (run.pass, e, at),
+                        + element_pull(
+                            (slopes, &mut accumulators[b * per_bank + at]),
+                            (t, at),
                             gy,
                             run.interior[e],
-                            run.du_dx,
                         )
                 }
                 None => first,
@@ -1080,61 +1239,37 @@ impl BackwardPull for EveryAndRoutedCotangent<'_> {
 /// initial value.
 #[inline(always)]
 fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
-    banks: &[Segments],
+    banks: &[Slopes],
     channels: usize,
     knots: &Knots,
     c: BackwardChunk<'_, P>,
     grad_coefs: &mut [f32],
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
-    // `du/dx` is the forward's `span`: one value, named for each of its two uses.
-    let du_dx = 0.5 * (knots.grid() - 1) as f32;
-    let last = (knots.grid() - 2) as f32;
+    let (span, last) = (0.5 * (knots.grid() - 1) as f32, (knots.grid() - 2) as f32);
     let segs = knots.controls().len();
-    // The coefficient gradient by segment (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
-    // Amendments 3 and 6): one accumulator per bank, channel and segment, four control slots wide,
-    // each element adding `gy · w` into its own segment's four slots at once; the chunk's sums are
-    // folded into its coefficients, per channel, in segment then slot order at the end. Per
-    // accumulator these are the additions of the segment-masked form, which added `0 · gy · w` into
-    // every other segment, in the same row order without its zeros, so the bits are its bits for
-    // finite values. The masked form's pass over every segment made the pullback slower, not
-    // faster: 7x at one channel, 1.9x at 32 (measured 2026-10-09).
+    // The coefficient gradient by leaf (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
+    // Amendments 3 and 6; 2026-10-23-incidence-partition, Amendment 7): one accumulator per bank,
+    // channel and leaf, four moments wide, each element adding `gy · (1, t, t², t³)` into its own
+    // leaf's slots; at the end each accumulator maps through its leaf's basis into the leaf's four
+    // control points ([`fold_moments`]), `∂L/∂q_k = Σ_e gy_e w_k(t_e) = (B_ℓ m)_k`. A pass over every
+    // leaf per element made the pullback slower, not faster: 7x at one channel, 1.9x at 32 (measured
+    // 2026-10-09).
     let per_bank = channels * segs;
     let mut by_segment = vec![[0.0f32; 4]; banks.len() * per_bank];
     // Runs of elements in row-major order, the channel a counter that wraps, as the forward: the
-    // segments, weights and derivatives of a run at once, then, bank by bank, its accumulators and
-    // input gradients by channel and segment.
+    // leaves and coordinates of a run at once, then, bank by bank, its moments and input gradients
+    // by channel and leaf.
     let mut pass = ElementPass::new();
     let mut ch = 0;
     for start in (0..c.x_clamped.len()).step_by(RUN) {
         let end = (start + RUN).min(c.x_clamped.len());
         let n = end - start;
         let x_clamped = &c.x_clamped[start..end];
-        let ElementPass {
-            segment: seg,
-            weights,
-            dweights,
-            scale,
-        } = &mut pass;
-        let seg = &mut seg[..n];
+        let ElementPass { segment: seg, t } = &mut pass;
+        let (seg, t) = (&mut seg[..n], &mut t[..n]);
         for e in 0..n {
-            let (w, dw) = if UNIFORM {
-                let (i, t) = segment(x_clamped[e], du_dx, last);
-                seg[e] = i as u32;
-                (cr_weights(t), cr_weight_derivatives(t))
-            } else {
-                let (leaf, t, cells) = knots.locate(x_clamped[e], du_dx);
-                seg[e] = leaf as u32;
-                scale[e] = cells;
-                (
-                    refined_weights(knots, leaf, t),
-                    refined_weight_derivatives(knots, leaf, t),
-                )
-            };
-            for k in 0..4 {
-                weights[k][e] = w[k];
-                dweights[k][e] = dw[k];
-            }
+            (seg[e], t[e]) = leaf_of::<UNIFORM>(knots, x_clamped[e], (span, last));
         }
         let run = PullRun {
             at: c.offset + start..c.offset + end,
@@ -1143,28 +1278,45 @@ fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
             first: ch,
             channels,
             segs,
-            du_dx,
         };
-        ch = c.pull.pull::<UNIFORM>(
+        ch = c.pull.pull(
             (banks, &mut by_segment, per_bank),
             &mut c.grad_x[start..end],
             &run,
         );
     }
     let coefs = channels * knots.len();
-    for (bank_grad, bank_accumulators) in grad_coefs
+    for ((bank_grad, bank_moments), bank) in grad_coefs
         .chunks_exact_mut(coefs)
         .zip(by_segment.chunks_exact(per_bank))
+        .zip(banks)
     {
-        let accumulators = bank_accumulators.chunks_exact(segs);
-        for (channel_grad, accumulators) in
-            bank_grad.chunks_exact_mut(knots.len()).zip(accumulators)
+        for (ch, (channel_grad, moments)) in bank_grad
+            .chunks_exact_mut(knots.len())
+            .zip(bank_moments.chunks_exact(segs))
+            .enumerate()
         {
-            for (slots, controls) in accumulators.iter().zip(&banks[0].controls) {
-                for (&sum, &j) in slots.iter().zip(controls) {
-                    channel_grad[j] += sum;
-                }
-            }
+            fold_moments(moments, (knots, &bank.bases, ch), channel_grad);
+        }
+    }
+}
+
+/// One channel's moments, one entry per leaf, mapped through each leaf's basis into its four control
+/// points and added there, in leaf then weight order: `grad[controls[ℓ][k]] += Σ_j B_ℓ[k][j] m_ℓ[j]`,
+/// the dot product in `f64`, rounded to `f32` before it is added.
+///
+/// # Preconditions
+/// `moments.len() == knots.controls().len()`, `grad.len() == knots.len()`.
+fn fold_moments(
+    moments: &[[f32; 4]],
+    (knots, bases, ch): (&Knots, &LeafBases, usize),
+    grad: &mut [f32],
+) {
+    for (leaf, (m, controls)) in moments.iter().zip(knots.controls()).enumerate() {
+        let basis = bases.get((ch, leaf));
+        let m = m.map(f64::from);
+        for (row, &j) in basis.iter().zip(controls) {
+            grad[j] += (row[0] * m[0] + row[1] * m[1] + row[2] * m[2] + row[3] * m[3]) as f32;
         }
     }
 }
@@ -1321,9 +1473,9 @@ fn backward_over<P: BackwardPull>(
     let block_len = coefs.len() * len;
     let mut partials = vec![0.0f32; blocks * block_len];
 
-    let banks: Vec<Segments> = coefs
+    let banks: Vec<Slopes> = coefs
         .iter()
-        .map(|coef| Segments::of(coef, cache.channels, knots))
+        .map(|coef| Slopes::slopes(coef, cache.channels, knots))
         .collect();
     let uniform = knots.is_uniform();
     let kernel = |(block, (gx, local)): (usize, (&mut [f32], &mut [f32]))| {
@@ -1710,50 +1862,6 @@ fn accumulate_chebyshev_coef_grad(grad_coef: &mut [f32], ch: usize, k: usize, x:
     }
 }
 
-fn cr_weights(t: f32) -> [f32; 4] {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    [
-        0.5 * (-t3 + 2.0 * t2 - t),
-        0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
-        0.5 * (-3.0 * t3 + 4.0 * t2 + t),
-        0.5 * (t3 - t2),
-    ]
-}
-
-fn cr_weight_derivatives(t: f32) -> [f32; 4] {
-    let t2 = t * t;
-    [
-        0.5 * (-3.0 * t2 + 4.0 * t - 1.0),
-        0.5 * (9.0 * t2 - 10.0 * t),
-        0.5 * (-9.0 * t2 + 8.0 * t + 1.0),
-        0.5 * (3.0 * t2 - 2.0 * t),
-    ]
-}
-
-/// The weights of refined knots' leaf `leaf` at `t`: the non-uniform Catmull–Rom, the cubic Hermite
-/// with tangents `(p_{k+1} − p_{k−1}) / (x_{k+1} − x_{k−1})`: `(−h₁₀ r₀, h₀₀ − h₁₁ r₁, h₀₁ + h₁₀ r₀,
-/// h₁₁ r₁)` with the leaf's tangent shares -- the uniform weights in exact arithmetic where both
-/// shares are ½. One form for every leaf, no branch per element (measured 2026-10-16: −7 % forward,
-/// −6 % backward at level 4 against a branch to the uniform expressions).
-#[inline(always)]
-fn refined_weights(knots: &Knots, leaf: usize, t: f32) -> [f32; 4] {
-    let (t2, [r0, r1]) = (t * t, knots.leaf_ratio(leaf));
-    let t3 = t2 * t;
-    let (h00, h10) = (2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t);
-    let (h01, h11) = (-2.0 * t3 + 3.0 * t2, t3 - t2);
-    [-h10 * r0, h00 - h11 * r1, h01 + h10 * r0, h11 * r1]
-}
-
-/// The `t`-derivatives of [`refined_weights`].
-#[inline(always)]
-fn refined_weight_derivatives(knots: &Knots, leaf: usize, t: f32) -> [f32; 4] {
-    let (t2, [r0, r1]) = (t * t, knots.leaf_ratio(leaf));
-    let (d00, d10) = (6.0 * t2 - 6.0 * t, 3.0 * t2 - 4.0 * t + 1.0);
-    let (d01, d11) = (-6.0 * t2 + 6.0 * t, 3.0 * t2 - 2.0 * t);
-    [-d10 * r0, d00 - d11 * r1, d01 + d10 * r0, d11 * r1]
-}
-
 fn chebyshev_terms(x: f32, k: usize) -> Vec<f32> {
     let mut terms = vec![0.0; k];
     if k == 0 {
@@ -1784,6 +1892,47 @@ mod tests {
 
     use super::*;
 
+    /// The uniform Catmull--Rom weights at `t`, the closed form: the minimal analytical reference the
+    /// power form is checked against.
+    fn cr_weights(t: f32) -> [f32; 4] {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        [
+            0.5 * (-t3 + 2.0 * t2 - t),
+            0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+            0.5 * (-3.0 * t3 + 4.0 * t2 + t),
+            0.5 * (t3 - t2),
+        ]
+    }
+
+    /// The `t`-derivatives of [`cr_weights`].
+    fn cr_weight_derivatives(t: f32) -> [f32; 4] {
+        let t2 = t * t;
+        [
+            0.5 * (-3.0 * t2 + 4.0 * t - 1.0),
+            0.5 * (9.0 * t2 - 10.0 * t),
+            0.5 * (-9.0 * t2 + 8.0 * t + 1.0),
+            0.5 * (3.0 * t2 - 2.0 * t),
+        ]
+    }
+
+    /// The largest magnitude in `v`.
+    fn largest(v: &[f32]) -> f32 {
+        v.iter().fold(0.0f32, |m, x| m.max(x.abs()))
+    }
+
+    /// The largest `|got − want|` over the two, and where.
+    fn worst(got: &[f32], want: &[f32]) -> (f32, usize) {
+        got.iter()
+            .zip(want)
+            .map(|(g, w)| (g - w).abs())
+            .enumerate()
+            .fold(
+                (0.0, 0),
+                |(m, at), (e, d)| if d > m { (d, e) } else { (m, at) },
+            )
+    }
+
     fn loss_sum_cr(coef: &[f32], x: &[f32], n: usize, channels: usize, grid: usize) -> f32 {
         catmull_rom_forward(coef, x, n, channels, &crate::knots::Knots::uniform(grid))
             .0
@@ -1793,11 +1942,12 @@ mod tests {
 
     // ── row-parallelism (2026-08-17) ────────────────────────────────────────
     //
-    // These pin the two guarantees the parallel paths must keep: the pure maps are
-    // bit-exact against an independent reference, and the `grad_coef` reduction is
-    // identical across thread counts. The reference below is deliberately a
-    // separate naive implementation rather than a call back into the production
-    // code, so a bug in the shared row kernel cannot hide by cancelling itself.
+    // These pin the two guarantees the parallel paths must keep: the pure maps agree
+    // with an independent reference to its rounding (the kernels evaluate the power
+    // form, the reference the closed-form weights), and every result is identical
+    // across thread counts. The reference below is deliberately a separate naive
+    // implementation rather than a call back into the production code, so a bug in
+    // the shared row kernel cannot hide by cancelling itself.
 
     fn pseudo_input(len: usize, salt: u32) -> Vec<f32> {
         (0..len)
@@ -1888,11 +2038,13 @@ mod tests {
         (grad_x, grad_coef)
     }
 
-    /// The forward is a pure map, so it must be **bit-exact** on both sides of the
-    /// parallel threshold — including a row count that does not divide the chunk
-    /// count, which is where an off-by-one in the chunking would show up.
+    /// The forward agrees with the closed-form weights on both sides of the parallel
+    /// threshold, to `2e-6` of the control points' magnitude — including a row count
+    /// that does not divide the chunk count, which is where an off-by-one in the
+    /// chunking would show up. The tape is bit-exact: the power form changes what the
+    /// second pass computes, not the clamp, the leaf or the coordinate.
     #[test]
-    fn forward_is_bit_exact_against_the_reference_on_both_paths() {
+    fn forward_matches_the_closed_form_weights_on_both_paths() {
         let (channels, grid) = (8usize, 6usize);
         // 511 * 8 = 4088 < PAR_MIN_ELEMS <= 513 * 8 = 4104: straddles the boundary,
         // and 1601 is coprime with the 64 chunks.
@@ -1902,7 +2054,13 @@ mod tests {
             let (out, cache) =
                 catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid));
             let (want_out, want_xc, want_idx, want_t) = naive_forward(&coef, &x, n, channels, grid);
-            assert_eq!(out, want_out, "n={n}: output must be bit-exact");
+            let (gap, at) = worst(&out, &want_out);
+            assert!(
+                gap <= 2e-6 * largest(&coef),
+                "n={n}: output {} vs {} at {at}",
+                out[at],
+                want_out[at]
+            );
             assert_eq!(cache.x_clamped, want_xc, "n={n}: clamped input");
             // The cache no longer stores the segment; the one expression both passes evaluate over
             // uniform knots must still agree with the reference's, bit for bit.
@@ -1923,11 +2081,13 @@ mod tests {
         }
     }
 
-    /// `grad_x` is a pure map and must be bit-exact. `grad_coef` is a reduction, so
-    /// it is only required to be *close* to the sequential order — the strict
-    /// requirement on it is thread-count independence, tested separately.
+    /// `grad_x` agrees with the closed-form weight derivatives to `2e-6` of
+    /// `|gy| · |q| · dt/dx` at their largest. `grad_coef` is a reduction, folded from
+    /// per-leaf moments, so it is required to be *close* to the reference's sequential
+    /// sum of `gy · w`, `1e-5` of its largest entry — the strict requirement on it is
+    /// thread-count independence, tested separately.
     #[test]
-    fn backward_grad_x_is_bit_exact_and_grad_coef_matches_closely() {
+    fn backward_matches_the_closed_form_weights_closely() {
         let (channels, grid) = (8usize, 6usize);
         for n in [1usize, 511, 513, 1600, 1601] {
             let x = pseudo_input(n * channels, 3);
@@ -1938,7 +2098,21 @@ mod tests {
             let got = catmull_rom_backward(&coef, &cache, &grad_y);
             let (want_gx, want_gc) = naive_backward(&coef, &cache, &grad_y);
 
-            assert_eq!(got.grad_x, want_gx, "n={n}: grad_x must be bit-exact");
+            let reach = largest(&grad_y) * largest(&coef) * 0.5 * (grid - 1) as f32;
+            let (gap, at) = worst(&got.grad_x, &want_gx);
+            assert!(
+                gap <= 2e-6 * reach,
+                "n={n}: grad_x {} vs {} at {at}",
+                got.grad_x[at],
+                want_gx[at]
+            );
+            assert!(
+                got.grad_x
+                    .iter()
+                    .zip(&cache.interior)
+                    .all(|(g, &inside)| inside || g.to_bits() == 0),
+                "n={n}: grad_x is exactly 0 outside the clamp interval"
+            );
 
             // Relative to the magnitude actually accumulated, not to 1.0 — the sum
             // grows with n, so an absolute tolerance would silently loosen.
@@ -2038,6 +2212,130 @@ mod tests {
             !in_pool(1, CALIFORNIA),
             "a single-threaded host must not pay for a rayon region"
         );
+    }
+
+    /// The non-uniform Catmull--Rom's weights at `t` on a leaf of tangent shares `(r₀, r₁)`, the
+    /// Hermite form `(−h₁₀ r₀, h₀₀ − h₁₁ r₁, h₀₁ + h₁₀ r₀, h₁₁ r₁)`, in `f64`.
+    fn hermite_weights(t: f64, (r0, r1): (f64, f64)) -> [f64; 4] {
+        let (t2, t3) = (t * t, t * t * t);
+        let (h00, h10) = (2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t);
+        let (h01, h11) = (-2.0 * t3 + 3.0 * t2, t3 - t2);
+        [-h10 * r0, h00 - h11 * r1, h01 + h10 * r0, h11 * r1]
+    }
+
+    /// Per leaf of `depths` its tangent shares `h / (h₋ + h)` and `h / (h + h₊)`, the widths in base
+    /// segment units (`2^-d`), a missing neighbour mirroring the leaf's own width.
+    fn tangent_shares(depths: &[u8]) -> Vec<(f64, f64)> {
+        let widths: Vec<f64> = depths
+            .iter()
+            .flat_map(|&d| (0..1u32 << d).map(move |_| 1.0 / f64::from(1u32 << d)))
+            .collect();
+        (0..widths.len())
+            .map(|k| {
+                let h = widths[k];
+                let before = if k == 0 { h } else { widths[k - 1] };
+                let after = widths.get(k + 1).copied().unwrap_or(h);
+                (h / (before + h), h / (h + after))
+            })
+            .collect()
+    }
+
+    /// **Every leaf's basis is its weights in powers of `t`** (Nagare plan
+    /// 2026-10-23-incidence-partition, Amendment 7): `B_ℓ τ(t)` against the Hermite form with the
+    /// leaf's tangent shares, derived here from the depths, over refined knots of several depths
+    /// (the deepest 8), and each leaf's scale `2^d`. The uniform basis is
+    /// `½ [[0, −1, 2, −1], [2, 0, −5, 3], [0, 1, 4, −3], [0, 0, −1, 1]]` exactly, and is [`cr_weights`].
+    #[test]
+    fn every_leaf_basis_is_its_hermite_weights_in_powers() {
+        let uniform = [
+            [0.0, -0.5, 1.0, -0.5],
+            [1.0, 0.0, -2.5, 1.5],
+            [0.0, 0.5, 2.0, -1.5],
+            [0.0, 0.0, -0.5, 0.5],
+        ];
+        for grid in [3, 6, 9] {
+            let knots = Knots::uniform(grid);
+            assert!(knots.basis().iter().all(|b| *b == uniform), "grid {grid}");
+            assert!(knots.scales().iter().all(|&s| s == 1.0), "grid {grid}");
+        }
+        for t in [0.0f32, 0.125, 0.3, 0.5, 0.77, 1.0] {
+            let tau = [1.0, t, t * t, t * t * t].map(f64::from);
+            for (k, &w) in cr_weights(t).iter().enumerate() {
+                let got: f64 = (0..4).map(|j| uniform[k][j] * tau[j]).sum();
+                assert!(
+                    (got - f64::from(w)).abs() < 1e-6,
+                    "t={t}, w{k}: {got} vs {w}"
+                );
+            }
+        }
+        let cases: [(usize, &[u8]); 4] = [
+            (6, &[0, 1, 2, 1, 0]),
+            (4, &[3, 0, 1]),
+            (5, &[0, 8, 0, 2]),
+            (3, &[2, 5]),
+        ];
+        for (grid, depths) in cases {
+            let knots = Knots::refined(grid, depths);
+            let shares = tangent_shares(depths);
+            assert_eq!(
+                knots.basis().len(),
+                shares.len(),
+                "{depths:?}: one basis a leaf"
+            );
+            let scales: Vec<f32> = depths
+                .iter()
+                .flat_map(|&d| (0..1u32 << d).map(move |_| (1u32 << d) as f32))
+                .collect();
+            assert_eq!(knots.scales(), scales.as_slice(), "{depths:?}: 2^d a leaf");
+            for (leaf, (basis, &share)) in knots.basis().iter().zip(&shares).enumerate() {
+                for t in [0.0f64, 0.2, 0.5, 0.9, 1.0] {
+                    let want = hermite_weights(t, share);
+                    for (k, row) in basis.iter().enumerate() {
+                        let got: f64 = (0..4).map(|j| row[j] * t.powi(j as i32)).sum();
+                        assert!(
+                            (got - want[k]).abs() < 1e-12,
+                            "{depths:?} leaf {leaf}, t={t}, w{k}: {got} vs {}",
+                            want[k]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Constant control points give a constant spline, exactly** (partition of unity): every leaf's
+    /// power coefficients are `(c, 0, 0, 0)` to far below `c`'s last bit, so the output is `c` bit for
+    /// bit over uniform and refined knots. Over uniform knots the coefficients are exactly
+    /// `(c, 0, 0, 0)` and the input gradient exactly zero.
+    #[test]
+    fn constant_control_points_give_a_constant_spline_exactly() {
+        let (n, channels) = (4099usize, 2usize);
+        let x = pseudo_input(n * channels, 11);
+        let knot_sets = [
+            Knots::uniform(6),
+            Knots::refined(6, &[0, 1, 2, 1, 0]),
+            Knots::refined(5, &[0, 8, 0, 2]),
+        ];
+        for knots in &knot_sets {
+            for c in [0.7f32, -1.3e3, 3.1e-5] {
+                let coef = vec![c; channels * knots.len()];
+                let (y, cache) = catmull_rom_forward(&coef, &x, n, channels, knots);
+                assert!(
+                    y.iter().all(|v| v.to_bits() == c.to_bits()),
+                    "{:?}, c={c}: the output is c",
+                    knots.depths()
+                );
+                if knots.is_uniform() {
+                    let polys = Polys::values(&coef, channels, knots);
+                    assert!(
+                        polys.table.iter().all(|a| *a == [c, 0.0, 0.0, 0.0]),
+                        "c={c}"
+                    );
+                    let back = catmull_rom_backward(&coef, &cache, &x);
+                    assert!(back.grad_x.iter().all(|&g| g == 0.0), "c={c}: no slope");
+                }
+            }
+        }
     }
 
     #[test]

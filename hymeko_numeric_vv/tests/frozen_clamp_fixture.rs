@@ -18,6 +18,14 @@
 //! fixture. That is a deliberate two-step: a fixture that blesses itself on mismatch is not a
 //! fixture. Re-recording the **frozen** column is a statement that the historical capture was
 //! wrong, and needs a report entry saying why.
+//!
+//! **Re-recorded 2026-10-24, both Catmull-Rom columns** (Nagare plan 2026-10-23-incidence-partition,
+//! Amendment 7, C1; the user approved the power form and its re-pins). The frozen oracle is built from
+//! the production entry points by design, so the power form's rounding reaches it: its column still
+//! applies the retired clamp Jacobian, under today's arithmetic, and agrees with the 2026-08-25 bytes
+//! in their last bits only (9 of 21 values moved, by up to 12 ulp). The historical capture was right;
+//! its bytes stay in the history of this file (`28d4ee6`). The Kochanek-Bartels columns did not move.
+//! Report: `nagare/reports/2026-10-23-incidence-partition.md`.
 
 mod support;
 
