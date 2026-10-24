@@ -9,7 +9,7 @@ use hymeko_spline::{
     catmull_rom_forward, catmull_rom_routed_backward_into, catmull_rom_routed_forward_into,
     chebyshev_cr_backward_into, chebyshev_cr_banks_backward_into, chebyshev_cr_banks_forward_into,
     chebyshev_cr_forward, chebyshev_cr_routed_backward_into, chebyshev_cr_routed_forward_into,
-    CatmullRomBanksBuffers, CatmullRomBuffers, CatmullRomCache, Knots, SKIP,
+    CatmullRomBanksBuffers, CatmullRomCache, Knots, RoutedBuffers, RoutedCotangents, SKIP,
 };
 
 fn lcg(seed: u64) -> impl FnMut() -> f32 {
@@ -263,24 +263,29 @@ fn assert_equal(what: &str, got: &[f32], want: &[f32]) {
     }
 }
 
-/// The routed calls (Nagare plan 2026-10-23-incidence-partition, Amendment 5): the output and the cache, and each
+/// The routed calls (Nagare plan 2026-10-23-incidence-partition, Amendments 5 and 6): the routed output, the
+/// every-element output where `every` (its cotangent) is given -- the first of `coefs` then that bank -- and each
 /// bank's control-point gradient with the input gradient.
 fn routed(
     coefs: &[Vec<f32>],
     (x, route, grad_y): (&[f32], &[u8], &[f32]),
+    every: Option<&[f32]>,
     shape: (usize, usize),
     knots: &Knots,
-) -> (Vec<f32>, Vec<Vec<f32>>, Vec<f32>) {
+) -> (Vec<f32>, Vec<f32>, Vec<Vec<f32>>, Vec<f32>) {
     let banks: Vec<&[f32]> = coefs.iter().map(Vec::as_slice).collect();
     let (mut out, mut cache) = (vec![0.0f32; x.len()], CatmullRomCache::default());
-    let into = CatmullRomBuffers {
+    let mut every_out = vec![0.0f32; if every.is_some() { x.len() } else { 0 }];
+    let into = RoutedBuffers {
         out: &mut out,
+        every: every.map(|_| every_out.as_mut_slice()),
         cache: &mut cache,
     };
     catmull_rom_routed_forward_into(&banks, route, x, shape, knots, into);
     let mut grad_x = vec![0.0f32; x.len()];
-    let grads = catmull_rom_routed_backward_into(&banks, route, &cache, grad_y, &mut grad_x);
-    (out, grads, grad_x)
+    let grads = RoutedCotangents { grad_y, every };
+    let grads = catmull_rom_routed_backward_into(&banks, route, &cache, grads, &mut grad_x);
+    (out, every_out, grads, grad_x)
 }
 
 /// **A routed element is its routed bank's** (Nagare plan 2026-10-23-incidence-partition, Amendment 5), over uniform
@@ -297,7 +302,7 @@ fn a_routed_element_is_its_routed_banks() {
             let (coefs, x, grad_ys) = fixture(shape, knots.len(), 700 + 10 * i as u64);
             let route = routes(x.len(), 800 + i as u64);
             let grad_y = &grad_ys[0];
-            let (out, grads, grad_x) = routed(&coefs, (&x, &route, grad_y), shape, knots);
+            let (out, _, grads, grad_x) = routed(&coefs, (&x, &route, grad_y), None, shape, knots);
             let alone = separately(&coefs, &x, &grad_ys, shape, knots).0;
             let want: Vec<f32> = route
                 .iter()
@@ -328,8 +333,9 @@ fn routed_chebyshev_is_its_routed_banks() {
     let route = routes(x.len(), 912);
     let banks: Vec<&[f32]> = coefs.iter().map(Vec::as_slice).collect();
     let (mut out, mut cache) = (vec![0.0f32; x.len()], CatmullRomCache::default());
-    let into = CatmullRomBuffers {
+    let into = RoutedBuffers {
         out: &mut out,
+        every: None,
         cache: &mut cache,
     };
     let (controls, basis) =
@@ -340,7 +346,10 @@ fn routed_chebyshev_is_its_routed_banks() {
         &control_banks,
         &basis,
         (&cache, &route),
-        &grad_y,
+        RoutedCotangents {
+            grad_y: &grad_y,
+            every: None,
+        },
         k,
         &mut grad_x,
     );
@@ -393,12 +402,81 @@ fn routed_calls_are_the_same_on_any_thread_count() {
             .num_threads(threads)
             .build()
             .expect("a pool")
-            .install(|| routed(&coefs, (&x, &route, &grad_ys[0]), shape, &knots))
+            .install(|| {
+                let route: Vec<u8> = route
+                    .iter()
+                    .map(|&r| if r == SKIP { r } else { r % 2 })
+                    .collect();
+                (
+                    routed(&coefs, (&x, &route, &grad_ys[0]), None, shape, &knots),
+                    routed(
+                        &coefs,
+                        (&x, &route, &grad_ys[0]),
+                        Some(&grad_ys[1]),
+                        shape,
+                        &knots,
+                    ),
+                )
+            })
     };
     let (one, four) = (run(1), run(4));
-    assert_eq!(bits(&one.0), bits(&four.0), "the output");
-    for (b, (one, four)) in one.1.iter().zip(&four.1).enumerate() {
-        assert_eq!(bits(one), bits(four), "bank {b}'s gradient");
+    for (what, one, four) in [("routed", &one.0, &four.0), ("with every", &one.1, &four.1)] {
+        assert_eq!(bits(&one.0), bits(&four.0), "{what}: the output");
+        assert_eq!(
+            bits(&one.1),
+            bits(&four.1),
+            "{what}: the every-element output"
+        );
+        for (b, (one, four)) in one.2.iter().zip(&four.2).enumerate() {
+            assert_eq!(bits(one), bits(four), "{what}: bank {b}'s gradient");
+        }
+        assert_eq!(bits(&one.3), bits(&four.3), "{what}: the input gradient");
     }
-    assert_eq!(bits(&one.2), bits(&four.2), "the input gradient");
+}
+
+/// **The every-element bank beside the routed ones is each its own bank's** (Nagare plan 2026-10-23-incidence-partition,
+/// Amendment 6, H1), over uniform and refined knots on both sides of the parallel threshold:
+/// - the first bank's output is its single-bank output on every element, bit for bit, and the routed output each
+///   element's routed bank's (the banks after the first), `0` where skipped;
+/// - the gradients are the banks backward's under the first bank's cotangent everywhere and each routed bank's at its
+///   elements, equal as numbers.
+#[test]
+fn the_every_element_bank_and_the_routed_ones_are_their_banks() {
+    let knot_sets = [Knots::uniform(6), Knots::refined(6, &[0, 0, 3, 0, 0])];
+    for knots in &knot_sets {
+        for (i, &shape) in SHAPES.iter().enumerate() {
+            let (coefs, x, grad_ys) = fixture(shape, knots.len(), 1700 + 10 * i as u64);
+            // Routes over the banks after the first.
+            let route: Vec<u8> = routes(x.len(), 1800 + i as u64)
+                .iter()
+                .map(|&r| if r == SKIP { r } else { r % (BANKS as u8 - 1) })
+                .collect();
+            let (grad_every, grad_y) = (&grad_ys[0], &grad_ys[1]);
+            let (out, every_out, grads, grad_x) =
+                routed(&coefs, (&x, &route, grad_y), Some(grad_every), shape, knots);
+            let alone = separately(&coefs, &x, &grad_ys, shape, knots).0;
+            assert_eq!(
+                bits(&every_out),
+                bits(&alone[0]),
+                "{shape:?}: the every-element output"
+            );
+            let want: Vec<f32> = route
+                .iter()
+                .enumerate()
+                .map(|(e, &r)| alone.get(1 + usize::from(r)).map_or(0.0, |o| o[e]))
+                .collect();
+            assert_eq!(bits(&out), bits(&want), "{shape:?}: the routed output");
+            let shifted: Vec<u8> = route
+                .iter()
+                .map(|&r| if r == SKIP { r } else { r + 1 })
+                .collect();
+            let mut cotangents = masked(grad_y, &shifted);
+            cotangents[0] = grad_every.clone();
+            let want = together(&coefs, &x, &cotangents, shape, knots);
+            for (b, (got, want)) in grads.iter().zip(&want.1).enumerate() {
+                assert_equal(&format!("{shape:?}: bank {b}'s gradient"), got, want);
+            }
+            assert_equal(&format!("{shape:?}: the input gradient"), &grad_x, &want.2);
+        }
+    }
 }
