@@ -217,6 +217,11 @@ consumers:
   - ../nagare
 
 approved_edits:
+  - slug: reusable-gmres-workspace
+    date: 2026-10-25
+    authority: user requests mathematical summary first, then fixes to GMRES storage and repeated work
+    scope: one hymeko_numerics workspace engine, preserved gmres facade, typed stopping tolerance, correctness and deterministic allocation checks; no new runtime dependencies or performance campaign
+    plan: docs/plans/2026-10-25-gmres-workspace/plan.pdf
   - slug: ordered-parallel-source-pagerank
     date: 2026-10-20
     authority: user requests fixing vertex-number dependence, then parallel execution and Hymeko-based model/execution handling

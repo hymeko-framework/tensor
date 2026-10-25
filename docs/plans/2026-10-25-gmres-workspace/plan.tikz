@@ -1,0 +1,7 @@
+\begin{center}\begin{tikzpicture}[node distance=12mm,box/.style={draw,rounded corners,align=center}]
+\node[box] (graph) {Core IR / Graph operator};
+\node[box,below=of graph] (solver) {Tensor: one GMRES engine\\caller-owned workspace};
+\node[box,left=18mm of solver] (physics) {Diffusion / PH};
+\node[box,below=of solver] (check) {Independent residual\\and application certificate};
+\draw[-{Latex}] (graph)--(solver);\draw[-{Latex}] (physics)--(solver);\draw[-{Latex}] (solver)--(check);
+\end{tikzpicture}\end{center}

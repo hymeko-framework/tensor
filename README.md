@@ -22,6 +22,26 @@ depend on this workspace.
 
 ## Build
 
+`hymeko_numerics::GmresWorkspace` provides reusable, dependency-free restarted
+GMRES storage for `(I - theta S)x = b`. Its `solve` method accepts a `GmresConfig`
+with explicit `GmresTolerance::Relative` or `Absolute`, restart and iteration
+budget. The existing `gmres(...)` facade calls this same engine with a temporary
+workspace. Operator implementations still supply only `dim` and `apply`.
+
+The workspace retains a contiguous basis and the small Hessenberg/rotation
+buffers between restarts and calls. A warmed solve allocates nothing when its
+buffers fit retained capacity and the operator itself does not allocate. It
+retains O(n * restart) storage; this is not a claim of lower resident memory.
+The true residual is checked at return, and `Report::residual` remains relative
+even when the stopping threshold is absolute. The 144 pre-change regression
+cases preserve solution/residual bits, iteration counts and operator-call counts.
+
+The Hungarian mathematical summary is
+[`docs/gmres/mathematical-summary.pdf`](docs/gmres/mathematical-summary.pdf), with
+its LaTeX source beside it; the numerical owner,
+scope and verification plan are in `docs/plans/2026-10-25-gmres-workspace/`.
+This allocation refactor has no new latency measurement yet.
+
 The existing compute arena supports
 `Pool::reclaim_completed_budgeted(watermark, max_checks)`. Each call inspects at
 most `max_checks` retired resources; incomplete epochs rotate behind the others.
