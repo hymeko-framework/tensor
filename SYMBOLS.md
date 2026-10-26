@@ -13,7 +13,7 @@ Extracted by grammar -- tree-sitter for Rust and C++, `ast` for Python -- so tha
 `pub(crate)`, a `pub fn` inside a private `mod`, and a `def` written inside a
 docstring are all excluded for a stated reason rather than by luck.
 
-**9 package(s), 441 public symbol(s).**
+**9 package(s), 443 public symbol(s).**
 
 ## hymeko_clifford (rust)
 
@@ -416,6 +416,7 @@ docstring are all excluded for a stated reason rather than by luck.
 - `config` — `hymeko_tensor/src/compute/arena/host.rs`
 - `config` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `contraction` — `hymeko_tensor/src/operator/ranges.rs`
+- `damped_least_squares` — `hymeko_tensor/src/linalg/dense.rs`
 - `decode` — `hymeko_tensor/src/stream.rs`
 - `dense_block` — `hymeko_tensor/src/sparse_workload.rs`
 - `dense_cholesky_solve` — `hymeko_tensor/src/linalg.rs`
@@ -498,6 +499,7 @@ docstring are all excluded for a stated reason rather than by luck.
 - `signed_incidence` — `hymeko_tensor/src/common.rs`
 - `small` — `hymeko_tensor/src/sparse_workload.rs`
 - `solve` — `hymeko_tensor/src/contraction/bounded.rs`
+- `solve_in_place` — `hymeko_tensor/src/linalg/dense.rs`
 - `spmm` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `spmm_into` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `spmm_into_parallel` — `hymeko_tensor/src/representations/tensor_csr.rs`
