@@ -41,6 +41,8 @@
 pub mod catmull_rom;
 /// Kochanek-Bartels (TCB) spline kernels.
 pub mod kochanek_bartels;
+/// Cubic Hermite interpolation of sampled f64 curves: values and derivatives at two knots.
+pub mod hermite;
 /// Rational B-spline curves and parameter derivatives in f64 homogeneous coordinates.
 pub mod nurbs;
 
