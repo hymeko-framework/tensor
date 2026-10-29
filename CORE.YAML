@@ -217,6 +217,11 @@ consumers:
   - ../nagare
 
 approved_edits:
+  - slug: native-dev-dll
+    date: 2026-10-28
+    authority: user requests applying the same Core/Graph DLL development build to Tensor
+    scope: downstream DLL re-exports and original-source correctness clients, Cargo aliases/profile and workspace cache isolation; preserve SSE4.1, optional features, production dependencies and arithmetic
+    plan: dev/README.txt
   - slug: reusable-gmres-workspace
     date: 2026-10-25
     authority: user requests mathematical summary first, then fixes to GMRES storage and repeated work

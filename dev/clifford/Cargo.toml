@@ -1,0 +1,52 @@
+[package]
+name = "hymeko-clifford-dev"
+version = "0.1.0"
+edition = "2024"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+description = "Original hymeko_clifford correctness clients through their owning shared library"
+
+[dependencies]
+hymeko_clifford = { package = "hymeko-clifford-dylib", path = "../dylib/clifford" }
+
+[[test]]
+name = "cayley_rotor_extraction"
+path = "../../hymeko_clifford/tests/cayley_rotor_extraction.rs"
+
+[[test]]
+name = "connection"
+path = "../../hymeko_clifford/tests/connection.rs"
+
+[[test]]
+name = "quat_primitive_bit_identity"
+path = "../../hymeko_clifford/tests/quat_primitive_bit_identity.rs"
+
+[[test]]
+name = "rotor_holonomy_extraction"
+path = "../../hymeko_clifford/tests/rotor_holonomy_extraction.rs"
+
+[[test]]
+name = "scenario_derivative"
+path = "../../hymeko_clifford/tests/scenario_derivative.rs"
+
+[[test]]
+name = "scenario_holonomy_transport"
+path = "../../hymeko_clifford/tests/scenario_holonomy_transport.rs"
+
+[[test]]
+name = "scenario_metric_sectors"
+path = "../../hymeko_clifford/tests/scenario_metric_sectors.rs"
+
+[[test]]
+name = "scenario_rotor_quaternion_agreement"
+path = "../../hymeko_clifford/tests/scenario_rotor_quaternion_agreement.rs"
+
+[[test]]
+name = "se_fixed"
+path = "../../hymeko_clifford/tests/se_fixed.rs"
+
+[[test]]
+name = "spatial"
+path = "../../hymeko_clifford/tests/spatial.rs"

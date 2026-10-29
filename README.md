@@ -11,7 +11,10 @@ workspace.
   `std`-only, no dependencies.
 - **`hymeko_clifford`** — Clifford / geometric-algebra foundation: dense `Multivector<N>`, signature, blade product,
   `Rotor`. `std`-only.
-- **`hymeko_graph`** — signed-incidence hypergraph algorithms (the native hyperconv substrate).
+- **`hymeko_spline`** -- spline activation kernels, with optional parallel execution.
+- **`hymeko_numerics`** -- matrix-free iterative solvers and reusable GMRES workspace.
+- **`hymeko_vision`** -- dependency-free vision primitives.
+- Graph algorithms belong to the separate `graph` repository.
 
 ## Provenance
 
@@ -57,3 +60,19 @@ cargo build
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
+
+## Native development with shared libraries
+
+`cargo dev-test --test gmres_workspace` and `cargo dev-test --test virtual_operators`
+reuse the original public-API tests through the existing numerical libraries' DLLs.
+Four independent downstream clients keep Tensor, Numerics, Clifford and Spline
+build dependencies separate. Twenty-eight correctness targets are available;
+three sparse targets require `hymeko-tensor-dev/sparse`. Spline parallel execution
+is selected with `hymeko-spline-dev/parallel`. SSE4.1 and existing kernel contracts
+are preserved. See [the development linkage contract](dev/README.txt).
+
+The alias uses a workspace-identified cache, so different source roots cannot
+silently reuse each other's binaries. Original production/default members,
+benchmark targets, allocator instrumentation, Python bindings and private unit
+tests retain their existing paths. This is development linkage, not a numerical
+algorithm or a runtime-memory optimization.

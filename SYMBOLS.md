@@ -13,7 +13,71 @@ Extracted by grammar -- tree-sitter for Rust and C++, `ast` for Python -- so tha
 `pub(crate)`, a `pub fn` inside a private `mod`, and a `def` written inside a
 docstring are all excluded for a stated reason rather than by luck.
 
-**9 package(s), 443 public symbol(s).**
+**17 package(s), 443 public symbol(s).**
+
+## hymeko-tensor-dev (rust)
+
+- **Root:** `dev`
+- **Manifest:** `dev/Cargo.toml`
+- **Charter:** Native Tensor development linkage -- 2026-10-28
+
+_No public symbols._
+
+## hymeko-clifford-dev (rust)
+
+- **Root:** `dev/clifford`
+- **Manifest:** `dev/clifford/Cargo.toml`
+- **Charter:** Native Clifford integration-test client
+
+_No public symbols._
+
+## hymeko-clifford-dylib (rust)
+
+- **Root:** `dev/dylib/clifford`
+- **Manifest:** `dev/dylib/clifford/Cargo.toml`
+- **Charter:** Development linkage only; all arithmetic remains in hymeko_clifford.
+
+_No public symbols._
+
+## hymeko-numerics-dylib (rust)
+
+- **Root:** `dev/dylib/numerics`
+- **Manifest:** `dev/dylib/numerics/Cargo.toml`
+- **Charter:** Development linkage only; all arithmetic remains in hymeko_numerics.
+
+_No public symbols._
+
+## hymeko-spline-dylib (rust)
+
+- **Root:** `dev/dylib/spline`
+- **Manifest:** `dev/dylib/spline/Cargo.toml`
+- **Charter:** Development linkage only; all arithmetic remains in hymeko_spline.
+
+_No public symbols._
+
+## hymeko-tensor-dylib (rust)
+
+- **Root:** `dev/dylib/tensor`
+- **Manifest:** `dev/dylib/tensor/Cargo.toml`
+- **Charter:** Development linkage only; all arithmetic remains in hymeko_tensor.
+
+_No public symbols._
+
+## hymeko-numerics-dev (rust)
+
+- **Root:** `dev/numerics`
+- **Manifest:** `dev/numerics/Cargo.toml`
+- **Charter:** Native Numerics integration-test client
+
+_No public symbols._
+
+## hymeko-spline-dev (rust)
+
+- **Root:** `dev/spline`
+- **Manifest:** `dev/spline/Cargo.toml`
+- **Charter:** Native Spline integration-test client
+
+_No public symbols._
 
 ## hymeko_clifford (rust)
 

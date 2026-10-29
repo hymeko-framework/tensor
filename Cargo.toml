@@ -13,4 +13,19 @@ members = [
     # Python bindings (pyo3). Downstream by construction, like hymeko_numeric_vv: it depends on the
     # production crates and nothing depends on it, so `pyo3` never enters a core crate's graph.
     "hymeko_tensor_py",
+    "dev",
+    "dev/numerics",
+    "dev/clifford",
+    "dev/spline",
+    "dev/dylib/tensor",
+    "dev/dylib/numerics",
+    "dev/dylib/clifford",
+    "dev/dylib/spline",
 ]
+
+# Existing workspaces remain the default; native DLL clients are explicitly selected.
+default-members = ["hymeko_clifford", "hymeko_spline", "hymeko_tensor", "hymeko_vision", "hymeko_numerics", "hymeko_numeric_vv", "hymeko_tensor_py"]
+
+[profile.dev-dll]
+inherits = "dev"
+debug = "line-tables-only"
