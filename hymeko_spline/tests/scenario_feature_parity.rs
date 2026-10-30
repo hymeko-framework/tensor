@@ -81,6 +81,8 @@ fn backward_bits_are_identical_across_feature_configurations() {
 // Amendment 7): the power form evaluates each leaf's cubic by Horner from coefficients computed once
 // per call and folds per-leaf moments through the leaf basis, so the forward, the input gradient and
 // the coefficient gradient each round differently; the same with and without `--features parallel`.
+// The coefficient gradient re-pinned 2026-10-24 (user approval "Approved"; Nagare plan
+// 2026-10-24-computed-parameters-once, Amendment 1): the blocks' moments are added in `f64`, then folded once.
 const GOLDEN_FORWARD: u64 = 11120622793391595860;
-const GOLDEN_GRAD_COEF: u64 = 9197819994515850099;
+const GOLDEN_GRAD_COEF: u64 = 1360101236142475722;
 const GOLDEN_GRAD_X: u64 = 11327949383195490707;

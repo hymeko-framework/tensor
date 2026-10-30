@@ -58,6 +58,8 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use std::borrow::Cow;
+
 use crate::knots::{Knots, Tangents};
 
 /// Row-parallelism is used only when `n * channels` reaches this many elements.
@@ -121,7 +123,13 @@ const MIN_ROWS_PER_BLOCK: usize = 32;
 /// `channels`, which is what makes `grad_coef` reproducible across machines.
 #[inline]
 fn block_stride(n: usize, channels: usize) -> usize {
-    n.div_ceil(ROW_BLOCKS).max(MIN_ROWS_PER_BLOCK) * channels
+    block_rows(n) * channels
+}
+
+/// Rows per block of the kernels' fixed partition of `n` rows.
+#[inline]
+fn block_rows(n: usize) -> usize {
+    n.div_ceil(ROW_BLOCKS).max(MIN_ROWS_PER_BLOCK)
 }
 
 /// Cache from Catmull--Rom forward needed by the closed-form backward.
@@ -234,6 +242,7 @@ fn leaf_of<const UNIFORM: bool>(knots: &Knots, xc: f32, (span, last): (f32, f32)
 /// # Invariants
 /// `table[ch · leaves + ℓ]` is channel `ch`'s entry on leaf `ℓ`, `leaves == knots.controls().len()`; `bases` the leaf
 /// bases the entries were computed through, which the pullback's fold reads again.
+#[derive(Debug, Clone)]
 struct Segments<C> {
     table: Vec<C>,
     leaves: usize,
@@ -244,6 +253,7 @@ struct Segments<C> {
 /// `bases[ch · stride + ℓ]`: under [`Tangents::Chord`] the knots' own per leaf, shared by every channel (`stride` 0);
 /// under [`Tangents::Bounded`] one per channel and leaf, the Hermite basis of the tangents its knots select (Nagare
 /// plan 2026-10-23-c1-lattice-activations, Amendment 1). One indexing for both, no branch at a read.
+#[derive(Debug, Clone)]
 struct LeafBases {
     bases: Vec<[[f64; 4]; 4]>,
     stride: usize,
@@ -642,6 +652,404 @@ fn forward_block_over<E: ForwardEmit>(
     }
 }
 
+/// Per channel and leaf the power coefficients of the value in the leaf's coordinate `t ∈ [0, 1]`,
+/// `y = a₀ + a₁ t + a₂ t² + a₃ t³`, under the knots' tangent rule: the forward's own table `a = B_ℓᵀ q`, summed in
+/// `f64`, before its rounding to `f32`. Laid out `[ch · leaves + ℓ]`, `leaves` the leaves of `knots`. What a shape
+/// certificate reads (Nagare plan 2026-10-24-elliptic-cr, E3): `t` is a positive affine map of the input on each
+/// leaf, `dt/dx = span · 2^d`.
+///
+/// # Panics
+/// When `coef.len() != channels · knots.len()`.
+#[must_use]
+pub fn catmull_rom_leaf_coefficients(
+    coef: &[f32],
+    channels: usize,
+    knots: &Knots,
+) -> Vec<[f64; 4]> {
+    assert_eq!(
+        coef.len(),
+        channels * knots.len(),
+        "one control point per knot and channel"
+    );
+    Segments::of(coef, channels, knots, |_, a| a).table
+}
+
+/// The coefficient tables of one or more banks of control points on `knots`, built once per parameter version and read
+/// by every forward and pullback under it (Nagare plans 2026-10-24-elliptic-cr, O2, and
+/// 2026-10-26-cell-spline-tables-per-version): per bank the forward's power coefficients, the pullback's slope
+/// coefficients and the leaf bases they were formed through -- under bounded tangents a function of the control points
+/// themselves. Where the control points are Chebyshev terms' image ([`Self::chebyshev`]), it keeps the knot basis and
+/// the term count, through which a pullback projects the control-point gradient onto the terms. Immutable: other
+/// control points are another `PreparedSpline`.
+///
+/// # Invariants
+/// At least one bank; each bank's tables are [`Segments::of`] of its control points, channels and knots, exactly as a
+/// per-call entry forms them.
+#[derive(Debug, Clone)]
+pub struct PreparedSpline {
+    polys: Vec<Polys>,
+    slopes: Vec<Slopes>,
+    channels: usize,
+    knots: Knots,
+    terms: Option<ChebyshevTerms>,
+}
+
+/// The Chebyshev side of a [`PreparedSpline`] whose control points the terms generated: the knot basis, flat
+/// `(grid, k)`, and `k`.
+#[derive(Debug, Clone)]
+struct ChebyshevTerms {
+    basis: Vec<f32>,
+    k: usize,
+}
+
+impl PreparedSpline {
+    /// One bank's tables: `coef`, `channels × knots.len()`, on `knots`.
+    ///
+    /// # Panics
+    /// When `coef.len() != channels · knots.len()`.
+    #[must_use]
+    pub fn new(coef: &[f32], channels: usize, knots: &Knots) -> Self {
+        Self::banks(&[coef], channels, knots)
+    }
+
+    /// Every bank's tables, in `coefs` order, each bank `channels × knots.len()` control points on `knots`.
+    ///
+    /// # Panics
+    /// With no bank, or when a bank is not `channels · knots.len()` long.
+    #[must_use]
+    pub fn banks(coefs: &[&[f32]], channels: usize, knots: &Knots) -> Self {
+        TableSource::Controls(coefs).check(channels, knots);
+        Self {
+            polys: coefs
+                .iter()
+                .map(|coef| Polys::values(coef, channels, knots))
+                .collect(),
+            slopes: coefs
+                .iter()
+                .map(|coef| Slopes::slopes(coef, channels, knots))
+                .collect(),
+            channels,
+            knots: knots.clone(),
+            terms: None,
+        }
+    }
+
+    /// The tables of the control points each bank of Chebyshev `terms` (`channels × k`) generates at `grid` uniform
+    /// knots -- the same control points and knots [`chebyshev_cr_banks_forward_into`] forms -- with the knot basis kept
+    /// for the pullback's projection.
+    ///
+    /// # Panics
+    /// As [`Self::banks`], and when a bank is not `channels · k` terms.
+    #[must_use]
+    pub fn chebyshev(terms: &[&[f32]], channels: usize, (grid, k): (usize, usize)) -> Self {
+        let (controls, basis) = chebyshev_controls(terms, channels, (grid, k));
+        let controls: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
+        Self {
+            terms: Some(ChebyshevTerms { basis, k }),
+            ..Self::banks(&controls, channels, &Knots::uniform(grid))
+        }
+    }
+
+    /// The channels the tables cover.
+    #[must_use]
+    pub const fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// The knots the tables were built on.
+    #[must_use]
+    pub const fn knots(&self) -> &Knots {
+        &self.knots
+    }
+
+    /// The banks the tables cover.
+    #[must_use]
+    pub fn bank_count(&self) -> usize {
+        self.polys.len()
+    }
+
+    /// Where the control points are Chebyshev terms' image ([`Self::chebyshev`]): the knot basis, flat `(grid, k)`,
+    /// and `k`, as the Chebyshev pullbacks read them.
+    #[must_use]
+    pub fn chebyshev_terms(&self) -> Option<(&[f32], usize)> {
+        self.terms.as_ref().map(|t| (t.basis.as_slice(), t.k))
+    }
+
+    /// The `f32` values the tables hold: what keeping them for a parameter version costs.
+    #[must_use]
+    pub fn retained_floats(&self) -> usize {
+        let polys: usize = self.polys.iter().map(|p| 4 * p.table.len()).sum();
+        let slopes: usize = self.slopes.iter().map(|s| 3 * s.table.len()).sum();
+        polys + slopes + self.terms.as_ref().map_or(0, |t| t.basis.len())
+    }
+}
+
+/// Where an input sits on a [`PreparedSpline`]'s knots (Nagare plan 2026-10-26-fused-cells): its leaf and its coordinate
+/// on it, from the clamped input, and whether the input lies in the closed clamp interval -- the values a forward
+/// evaluates at and a pullback reads again, by the kernels' own expressions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Located {
+    leaf: u32,
+    t: f32,
+    interior: bool,
+}
+
+/// One block's partial moments of a pullback over a [`PreparedSpline`]'s banks (Nagare plan 2026-10-26-fused-cells):
+/// per bank, channel and leaf `ḡ (1, t, t², t³)` in `f32`, as the kernels' blocks accumulate them. A traversal keeps one
+/// per block and hands them, in block order, to [`PreparedSpline::gradients`].
+#[derive(Debug, Clone)]
+pub struct Moments {
+    acc: Vec<[f32; 4]>,
+    per_bank: usize,
+}
+
+impl Moments {
+    /// Bank `bank`'s accumulators, `[channel · leaves + leaf]`, each `ḡ (1, t, t², t³)` summed: where a traversal adds
+    /// its elements' moments itself (Nagare plan 2026-10-26-fused-cells, Track C).
+    pub fn bank_mut(&mut self, bank: usize) -> &mut [[f32; 4]] {
+        &mut self.acc[bank * self.per_bank..(bank + 1) * self.per_bank]
+    }
+
+    /// Every bank's accumulators at once, in bank order: disjoint slices, as [`Self::bank_mut`] gives them one by one.
+    pub fn banks_mut(&mut self) -> std::slice::ChunksExactMut<'_, [f32; 4]> {
+        self.acc.chunks_exact_mut(self.per_bank.max(1))
+    }
+}
+
+impl PreparedSpline {
+    /// Where `x` sits on the knots: the clamp to `[-1, 1]`, the leaf and the coordinate of the clamped value, and the
+    /// interval test of the raw one -- the forward's first pass for one element.
+    #[inline(always)]
+    fn locate(&self, x: f32) -> Located {
+        let (span, last) = (
+            0.5 * (self.knots.grid() - 1) as f32,
+            (self.knots.grid() - 2) as f32,
+        );
+        let xc = x.clamp(-1.0, 1.0);
+        let (leaf, t) = if self.knots.is_uniform() {
+            leaf_of::<true>(&self.knots, xc, (span, last))
+        } else {
+            leaf_of::<false>(&self.knots, xc, (span, last))
+        };
+        Located {
+            leaf,
+            t,
+            interior: (-1.0..=1.0).contains(&x),
+        }
+    }
+
+    /// Every element of `x` located at once, into `leaf`, `t` and `interior` (each `x.len()` long): the forward's first
+    /// pass over a row, which vectorises on uniform knots (Nagare plan 2026-10-26-fused-cells, Track C).
+    ///
+    /// # Panics
+    /// When the outputs are shorter than `x`.
+    #[inline(always)]
+    pub fn locate_row(
+        &self,
+        x: &[f32],
+        (leaf, t, interior): (&mut [u32], &mut [f32], &mut [bool]),
+    ) {
+        let (span, last) = (
+            0.5 * (self.knots.grid() - 1) as f32,
+            (self.knots.grid() - 2) as f32,
+        );
+        let (leaf, t, interior) = (
+            &mut leaf[..x.len()],
+            &mut t[..x.len()],
+            &mut interior[..x.len()],
+        );
+        if self.knots.is_uniform() {
+            for (((&raw, l), tt), inside) in x
+                .iter()
+                .zip(leaf.iter_mut())
+                .zip(t.iter_mut())
+                .zip(interior.iter_mut())
+            {
+                let (i, u) = segment(raw.clamp(-1.0, 1.0), span, last);
+                *l = i as u32;
+                *tt = u;
+                *inside = (-1.0..=1.0).contains(&raw);
+            }
+        } else {
+            for (((&raw, l), tt), inside) in x
+                .iter()
+                .zip(leaf.iter_mut())
+                .zip(t.iter_mut())
+                .zip(interior.iter_mut())
+            {
+                let at = self.locate(raw);
+                (*l, *tt, *inside) = (at.leaf, at.t, at.interior);
+            }
+        }
+    }
+
+    /// Leaves per channel: the tables' stride.
+    #[must_use]
+    pub fn leaves(&self) -> usize {
+        self.knots.controls().len()
+    }
+
+    /// Bank `bank`'s forward table, `[channel · leaves + leaf]`, each leaf's power coefficients `a`:
+    /// `y = a₀ + t(a₁ + t(a₂ + t a₃))` (Nagare plan 2026-10-26-fused-cells, Track C).
+    #[must_use]
+    pub fn power_table(&self, bank: usize) -> &[[f32; 4]] {
+        &self.polys[bank].table
+    }
+
+    /// Bank `bank`'s pullback table, `[channel · leaves + leaf]`, each leaf's slope coefficients `β`, the scale folded
+    /// in: `dy/dx = β₁ + t(β₂ + t β₃)` inside the clamp interval.
+    #[must_use]
+    pub fn slope_table(&self, bank: usize) -> &[[f32; 3]] {
+        &self.slopes[bank].table
+    }
+
+    /// Zeroed moments for every bank.
+    #[must_use]
+    pub fn moments(&self) -> Moments {
+        let segs = self.knots.controls().len();
+        let per_bank = self.channels * segs;
+        Moments {
+            acc: vec![[0.0; 4]; self.polys.len() * per_bank],
+            per_bank,
+        }
+    }
+
+    /// Each bank's parameter gradient from the blocks' moments, added in `f64` in the order given and folded through the
+    /// leaf bases ([`fold_partials`], the kernels' reduction); for Chebyshev tables projected onto the terms.
+    ///
+    /// # Panics
+    /// When a block's moments belong to other tables.
+    #[must_use]
+    pub fn gradients(&self, blocks: &[Moments]) -> Vec<Vec<f32>> {
+        let len = self.polys.len() * self.channels * self.knots.controls().len();
+        assert!(
+            blocks.iter().all(|m| m.acc.len() == len),
+            "moments of these tables"
+        );
+        let control = fold_partials(
+            &self.slopes,
+            blocks.iter().map(|m| m.acc.as_slice()),
+            (self.channels, &self.knots),
+        );
+        match &self.terms {
+            None => control,
+            Some(terms) => control
+                .iter()
+                .map(|g| {
+                    chebyshev_terms_gradient(
+                        g,
+                        &terms.basis,
+                        (self.channels, self.knots.len(), terms.k),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Where a call's coefficient tables come from (Nagare plan 2026-10-26-cell-spline-tables-per-version): built in the
+/// call from each bank's control points, or borrowed from a [`PreparedSpline`] built once for them. The two give the
+/// same tables, bit for bit, and the kernels read them the same way; a prepared source builds nothing in the call.
+#[derive(Debug, Clone, Copy)]
+pub enum TableSource<'a> {
+    /// Each bank's control points, flat `(channels, knots.len())`: the call builds their tables.
+    Controls(&'a [&'a [f32]]),
+    /// The tables prepared once for the control points' version.
+    Prepared(&'a PreparedSpline),
+}
+
+impl<'a> From<&'a [&'a [f32]]> for TableSource<'a> {
+    fn from(coefs: &'a [&'a [f32]]) -> Self {
+        Self::Controls(coefs)
+    }
+}
+
+impl<'a, const N: usize> From<&'a [&'a [f32]; N]> for TableSource<'a> {
+    fn from(coefs: &'a [&'a [f32]; N]) -> Self {
+        Self::Controls(coefs)
+    }
+}
+
+impl<'a> From<&'a Vec<&'a [f32]>> for TableSource<'a> {
+    fn from(coefs: &'a Vec<&'a [f32]>) -> Self {
+        Self::Controls(coefs)
+    }
+}
+
+impl<'a> From<&'a PreparedSpline> for TableSource<'a> {
+    fn from(prepared: &'a PreparedSpline) -> Self {
+        Self::Prepared(prepared)
+    }
+}
+
+impl<'a> TableSource<'a> {
+    /// The banks the source holds.
+    fn bank_count(self) -> usize {
+        match self {
+            Self::Controls(coefs) => coefs.len(),
+            Self::Prepared(prepared) => prepared.bank_count(),
+        }
+    }
+
+    /// The source fits a call over `channels` on `knots`.
+    ///
+    /// # Panics
+    /// With no bank; when a bank's control points are not `channels · knots.len()`; when prepared tables were built
+    /// for other channels or on other knots.
+    fn check(self, channels: usize, knots: &Knots) {
+        match self {
+            Self::Controls(coefs) => {
+                assert!(!coefs.is_empty(), "at least one bank");
+                for coef in coefs {
+                    assert_eq!(
+                        coef.len(),
+                        channels * knots.len(),
+                        "one control point per knot and channel"
+                    );
+                }
+            }
+            Self::Prepared(prepared) => {
+                assert_eq!(prepared.channels, channels, "the tables' channels");
+                assert_eq!(&prepared.knots, knots, "the tables' knots");
+            }
+        }
+    }
+
+    /// The forward's tables, one per bank, for a call over `channels` on `knots`: built, or borrowed.
+    ///
+    /// # Panics
+    /// As [`Self::check`].
+    fn polys(self, channels: usize, knots: &Knots) -> Cow<'a, [Polys]> {
+        self.check(channels, knots);
+        match self {
+            Self::Controls(coefs) => Cow::Owned(
+                coefs
+                    .iter()
+                    .map(|coef| Polys::values(coef, channels, knots))
+                    .collect(),
+            ),
+            Self::Prepared(prepared) => Cow::Borrowed(&prepared.polys),
+        }
+    }
+
+    /// The pullback's tables, one per bank, for a call over `channels` on `knots`: built, or borrowed.
+    ///
+    /// # Panics
+    /// As [`Self::check`].
+    fn slopes(self, channels: usize, knots: &Knots) -> Cow<'a, [Slopes]> {
+        self.check(channels, knots);
+        match self {
+            Self::Controls(coefs) => Cow::Owned(
+                coefs
+                    .iter()
+                    .map(|coef| Slopes::slopes(coef, channels, knots))
+                    .collect(),
+            ),
+            Self::Prepared(prepared) => Cow::Borrowed(&prepared.slopes),
+        }
+    }
+}
+
 /// Forward Catmull--Rom activation.
 ///
 /// # Preconditions
@@ -719,41 +1127,58 @@ pub struct CatmullRomBanksBuffers<'a> {
 /// is [`catmull_rom_forward`] of `coefs[b]`, and the clamp, the leaf and the coordinate of every element
 /// are computed once for all of them, into one tape.
 ///
+/// The tables come from `coefs` ([`TableSource`]): built in the call from each bank's control points, or borrowed from
+/// a [`PreparedSpline`].
+///
 /// # Preconditions
-/// At least one bank; every `coefs[b].len() == channels * knots.len()`; one output per bank, each
-/// `n * channels`; `x.len() == n * channels`.
+/// At least one bank; every control-point bank `channels * knots.len()` long, or prepared tables for `channels` on
+/// `knots`; one output per bank, each `n * channels`; `x.len() == n * channels`.
 ///
 /// # Postconditions
-/// Each `into.outs[b]` is bit for bit [`catmull_rom_forward`]'s output for `coefs[b]`, and `into.cache`
-/// its cache (the same for every bank).
-pub fn catmull_rom_banks_forward_into(
-    coefs: &[&[f32]],
+/// Each `into.outs[b]` is bit for bit [`catmull_rom_forward`]'s output for bank `b`'s control points, and
+/// `into.cache` its cache (the same for every bank).
+pub fn catmull_rom_banks_forward_into<'a>(
+    coefs: impl Into<TableSource<'a>>,
     x: &[f32],
     n: usize,
     channels: usize,
     knots: &Knots,
     into: CatmullRomBanksBuffers<'_>,
 ) {
-    let CatmullRomBanksBuffers { mut outs, cache } = into;
+    let CatmullRomBanksBuffers { outs, cache } = into;
     // Three is the smallest grid this operator **supports**: `i` ranges over `{0, 1}`, giving two
     // segments, and the outer stencil points are supplied by the endpoint replication
     // `cr_control_indices` already performs. The CogInfoCom HSiKAN configuration uses grid 3, which
     // is why the minimum moved from 4. Grid 2 is out of contract here — not asserted to be
     // mathematically impossible, simply not a configuration this operator is certified for.
-    assert!(!coefs.is_empty(), "at least one bank");
+    let tables = coefs.into();
     assert_eq!(x.len(), n * channels);
-    assert_eq!(outs.len(), coefs.len(), "one output per bank");
-    for (coef, out) in coefs.iter().zip(&outs) {
-        assert_eq!(coef.len(), channels * knots.len());
+    assert_eq!(outs.len(), tables.bank_count(), "one output per bank");
+    for out in &outs {
         assert_eq!(out.len(), x.len(), "out must be (n, channels)");
     }
+    let banks = tables.polys(channels, knots);
+    forward_tables(
+        &banks,
+        x,
+        (n, channels),
+        knots,
+        CatmullRomBanksBuffers { outs, cache },
+    );
+}
 
+/// The banks forward over tables already built or borrowed ([`TableSource`]): every element's clamp, leaf and coordinate
+/// once, into the tape, and each bank's polynomial on it.
+fn forward_tables(
+    banks: &[Polys],
+    x: &[f32],
+    (n, channels): (usize, usize),
+    knots: &Knots,
+    into: CatmullRomBanksBuffers<'_>,
+) {
+    let CatmullRomBanksBuffers { mut outs, cache } = into;
     refill(cache, (n, channels), knots);
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let banks: Vec<Polys> = coefs
-        .iter()
-        .map(|coef| Polys::values(coef, channels, knots))
-        .collect();
 
     // Rows are independent and write disjoint slices, so this is a pure map and the
     // parallel result is bit-identical to the sequential one at any thread count.
@@ -778,7 +1203,7 @@ pub fn catmull_rom_banks_forward_into(
             .zip(x.par_chunks(stride))
             .for_each(|(((outs, xc_b), in_b), x_b)| {
                 forward_block_over(
-                    &banks,
+                    banks,
                     knots,
                     channels,
                     x_b,
@@ -793,7 +1218,7 @@ pub fn catmull_rom_banks_forward_into(
     }
 
     forward_block_over(
-        &banks,
+        banks,
         knots,
         channels,
         x,
@@ -844,14 +1269,16 @@ pub struct RoutedCotangents<'a> {
 /// the routes index the banks after it (Amendment 6, H1). The clamp, the leaf and the coordinate are computed once,
 /// into the one tape a banks forward writes.
 ///
+/// The tables come from `coefs` ([`TableSource`]), as in [`catmull_rom_banks_forward_into`].
+///
 /// # Preconditions
 /// As [`catmull_rom_banks_forward_into`]; `route.len() == x.len()`, every route a routed bank's index or [`SKIP`];
 /// each output `n · channels`.
 ///
 /// # Postconditions
 /// Each written element is bit for bit its bank's single-bank output at it; `into.cache` the single-bank cache.
-pub fn catmull_rom_routed_forward_into(
-    coefs: &[&[f32]],
+pub fn catmull_rom_routed_forward_into<'a>(
+    coefs: impl Into<TableSource<'a>>,
     route: &[u8],
     x: &[f32],
     (n, channels): (usize, usize),
@@ -859,8 +1286,9 @@ pub fn catmull_rom_routed_forward_into(
     into: RoutedBuffers<'_>,
 ) {
     let RoutedBuffers { out, every, cache } = into;
-    let routed = coefs.len() - usize::from(every.is_some());
-    assert!(!coefs.is_empty(), "at least one bank");
+    let tables = coefs.into();
+    let banks = tables.polys(channels, knots);
+    let routed = banks.len() - usize::from(every.is_some());
     assert_eq!(x.len(), n * channels);
     assert_eq!(route.len(), x.len(), "one route per element");
     assert_eq!(out.len(), x.len(), "out must be (n, channels)");
@@ -868,14 +1296,11 @@ pub fn catmull_rom_routed_forward_into(
         every.as_ref().is_none_or(|e| e.len() == x.len()),
         "every must be (n, channels)"
     );
-    for coef in coefs {
-        assert_eq!(coef.len(), channels * knots.len());
-    }
     debug_assert!(route.iter().all(|&b| b == SKIP || usize::from(b) < routed));
     refill(cache, (n, channels), knots);
     if let Some(every) = every {
         return routed_forward_with_every(
-            coefs,
+            &banks,
             (route, out, every),
             x,
             (n, channels),
@@ -883,10 +1308,6 @@ pub fn catmull_rom_routed_forward_into(
         );
     }
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let banks: Vec<Polys> = coefs
-        .iter()
-        .map(|coef| Polys::values(coef, channels, knots))
-        .collect();
     #[cfg(feature = "parallel")]
     if use_parallel(x.len()) {
         let stride = block_stride(n, channels);
@@ -929,17 +1350,13 @@ pub fn catmull_rom_routed_forward_into(
 /// [`catmull_rom_routed_forward_into`] with the first bank on every element: the same blocks, the every-element output
 /// split with the routed one.
 fn routed_forward_with_every(
-    coefs: &[&[f32]],
+    banks: &[Polys],
     (route, out, every): (&[u8], &mut [f32], &mut [f32]),
     x: &[f32],
     (n, channels): (usize, usize),
     (knots, cache): (&Knots, &mut CatmullRomCache),
 ) {
     let (x_clamped, interior) = (&mut cache.x_clamped, &mut cache.interior);
-    let banks: Vec<Polys> = coefs
-        .iter()
-        .map(|coef| Polys::values(coef, channels, knots))
-        .collect();
     #[cfg(feature = "parallel")]
     if use_parallel(x.len()) {
         let stride = block_stride(n, channels);
@@ -951,7 +1368,7 @@ fn routed_forward_with_every(
             .zip(x.par_chunks(stride))
             .for_each(|(((((out_b, every_b), route_b), xc_b), in_b), x_b)| {
                 forward_block_over(
-                    &banks,
+                    banks,
                     knots,
                     channels,
                     x_b,
@@ -970,7 +1387,7 @@ fn routed_forward_with_every(
     }
     let _ = n;
     forward_block_over(
-        &banks,
+        banks,
         knots,
         channels,
         x,
@@ -1243,7 +1660,7 @@ fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
     channels: usize,
     knots: &Knots,
     c: BackwardChunk<'_, P>,
-    grad_coefs: &mut [f32],
+    by_segment: &mut [[f32; 4]],
 ) {
     debug_assert_eq!(c.grad_x.len() % channels, 0, "chunk must be whole rows");
     let (span, last) = (0.5 * (knots.grid() - 1) as f32, (knots.grid() - 2) as f32);
@@ -1251,12 +1668,12 @@ fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
     // The coefficient gradient by leaf (Nagare plan 2026-10-08-orthtree-hypergraph-convolution,
     // Amendments 3 and 6; 2026-10-23-incidence-partition, Amendment 7): one accumulator per bank,
     // channel and leaf, four moments wide, each element adding `gy · (1, t, t², t³)` into its own
-    // leaf's slots; at the end each accumulator maps through its leaf's basis into the leaf's four
-    // control points ([`fold_moments`]), `∂L/∂q_k = Σ_e gy_e w_k(t_e) = (B_ℓ m)_k`. A pass over every
-    // leaf per element made the pullback slower, not faster: 7x at one channel, 1.9x at 32 (measured
-    // 2026-10-09).
+    // leaf's slots. The block's accumulators are its partial; [`backward_over`] adds the blocks'
+    // and maps the sums through each leaf's basis once ([`fold_moments`]), `∂L/∂q_k = Σ_e gy_e
+    // w_k(t_e) = (B_ℓ m)_k`. A pass over every leaf per element made the pullback slower, not faster:
+    // 7x at one channel, 1.9x at 32 (measured 2026-10-09).
     let per_bank = channels * segs;
-    let mut by_segment = vec![[0.0f32; 4]; banks.len() * per_bank];
+    debug_assert_eq!(by_segment.len(), banks.len() * per_bank);
     // Runs of elements in row-major order, the channel a counter that wraps, as the forward: the
     // leaves and coordinates of a run at once, then, bank by bank, its moments and input gradients
     // by channel and leaf.
@@ -1280,24 +1697,10 @@ fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
             segs,
         };
         ch = c.pull.pull(
-            (banks, &mut by_segment, per_bank),
+            (banks, &mut *by_segment, per_bank),
             &mut c.grad_x[start..end],
             &run,
         );
-    }
-    let coefs = channels * knots.len();
-    for ((bank_grad, bank_moments), bank) in grad_coefs
-        .chunks_exact_mut(coefs)
-        .zip(by_segment.chunks_exact(per_bank))
-        .zip(banks)
-    {
-        for (ch, (channel_grad, moments)) in bank_grad
-            .chunks_exact_mut(knots.len())
-            .zip(bank_moments.chunks_exact(segs))
-            .enumerate()
-        {
-            fold_moments(moments, (knots, &bank.bases, ch), channel_grad);
-        }
     }
 }
 
@@ -1308,13 +1711,12 @@ fn backward_chunk<const UNIFORM: bool, P: BackwardPull>(
 /// # Preconditions
 /// `moments.len() == knots.controls().len()`, `grad.len() == knots.len()`.
 fn fold_moments(
-    moments: &[[f32; 4]],
+    moments: &[[f64; 4]],
     (knots, bases, ch): (&Knots, &LeafBases, usize),
     grad: &mut [f32],
 ) {
     for (leaf, (m, controls)) in moments.iter().zip(knots.controls()).enumerate() {
         let basis = bases.get((ch, leaf));
-        let m = m.map(f64::from);
         for (row, &j) in basis.iter().zip(controls) {
             grad[j] += (row[0] * m[0] + row[1] * m[1] + row[2] * m[2] + row[3] * m[3]) as f32;
         }
@@ -1369,26 +1771,29 @@ pub fn catmull_rom_backward_into(
 /// The pullback of [`catmull_rom_banks_forward_into`] (tensor plan 2026-10-22-cr-banks): each bank's
 /// control-point gradient, and the input gradient summed over the banks, written into `grad_x`.
 ///
+/// The tables come from `coefs` ([`TableSource`]): built in the call, or borrowed from a [`PreparedSpline`].
+///
 /// # Preconditions
 /// The banks and the cache of one banks forward; one cotangent per bank, each `n · channels`;
 /// `grad_x.len() == n · channels`.
 ///
 /// # Postconditions
-/// Bank `b`'s gradient is bit for bit [`catmull_rom_backward_into`]'s for `coefs[b]` and `grad_ys[b]`;
-/// `grad_x` is the banks' input gradients summed in bank order, every element written, `0` outside the
-/// clamp interval.
-pub fn catmull_rom_banks_backward_into(
-    coefs: &[&[f32]],
+/// Bank `b`'s gradient is bit for bit [`catmull_rom_backward_into`]'s for bank `b`'s control points and
+/// `grad_ys[b]`; `grad_x` is the banks' input gradients summed in bank order, every element written, `0`
+/// outside the clamp interval.
+pub fn catmull_rom_banks_backward_into<'a>(
+    coefs: impl Into<TableSource<'a>>,
     cache: &CatmullRomCache,
     grad_ys: &[&[f32]],
     grad_x: &mut [f32],
 ) -> Vec<Vec<f32>> {
+    let tables = coefs.into();
     let elems = cache.n * cache.channels;
-    assert_eq!(grad_ys.len(), coefs.len(), "one cotangent per bank");
+    assert_eq!(grad_ys.len(), tables.bank_count(), "one cotangent per bank");
     for grad_y in grad_ys {
         assert_eq!(grad_y.len(), elems);
     }
-    backward_over(coefs, cache, grad_x, &AllCotangents { grad_ys })
+    backward_over(tables, cache, grad_x, &AllCotangents { grad_ys })
 }
 
 /// The pullback of [`catmull_rom_routed_forward_into`] (Nagare plan 2026-10-23-incidence-partition, Amendments 5 and
@@ -1404,13 +1809,14 @@ pub fn catmull_rom_banks_backward_into(
 /// The gradients are [`catmull_rom_banks_backward_into`]'s under each bank's cotangent at the elements it was read at
 /// and zero elsewhere, the input gradient's terms summed in bank order; bit for bit for finite values, the zeros it no
 /// longer adds aside.
-pub fn catmull_rom_routed_backward_into(
-    coefs: &[&[f32]],
+pub fn catmull_rom_routed_backward_into<'a>(
+    coefs: impl Into<TableSource<'a>>,
     route: &[u8],
     cache: &CatmullRomCache,
     grads: RoutedCotangents<'_>,
     grad_x: &mut [f32],
 ) -> Vec<Vec<f32>> {
+    let tables = coefs.into();
     let elems = cache.n * cache.channels;
     let RoutedCotangents { grad_y, every } = grads;
     assert_eq!(grad_y.len(), elems);
@@ -1419,7 +1825,7 @@ pub fn catmull_rom_routed_backward_into(
         Some(every) => {
             assert_eq!(every.len(), elems);
             backward_over(
-                coefs,
+                tables,
                 cache,
                 grad_x,
                 &EveryAndRoutedCotangent {
@@ -1429,25 +1835,38 @@ pub fn catmull_rom_routed_backward_into(
                 },
             )
         }
-        None => backward_over(coefs, cache, grad_x, &RoutedCotangent { route, grad_y }),
+        None => backward_over(tables, cache, grad_x, &RoutedCotangent { route, grad_y }),
     }
 }
 
 /// The one pullback of a banks or routed forward: blocks of rows, each its own `grad_x` slice and accumulators, the
 /// partials summed in block order.
 fn backward_over<P: BackwardPull>(
-    coefs: &[&[f32]],
+    tables: TableSource<'_>,
     cache: &CatmullRomCache,
     grad_x: &mut [f32],
     pull: &P,
 ) -> Vec<Vec<f32>> {
     let elems = cache.n * cache.channels;
-    let len = cache.channels * cache.grid;
-    assert!(!coefs.is_empty(), "at least one bank");
-    for coef in coefs {
-        assert_eq!(coef.len(), len);
-    }
     assert_eq!(grad_x.len(), elems, "grad_x must be (n, channels)");
+    let knots = cache
+        .knots
+        .as_ref()
+        .expect("a forward wrote the cache, and recorded its knots");
+    let banks = tables.slopes(cache.channels, knots);
+    backward_tables(&banks, cache, grad_x, pull)
+}
+
+/// The one pullback over tables already built or borrowed ([`TableSource`]): blocks of rows, each its own `grad_x` slice and accumulators, the
+/// partials summed in block order.
+fn backward_tables<P: BackwardPull>(
+    banks: &[Slopes],
+    cache: &CatmullRomCache,
+    grad_x: &mut [f32],
+    pull: &P,
+) -> Vec<Vec<f32>> {
+    let elems = cache.n * cache.channels;
+    debug_assert_eq!(grad_x.len(), elems, "grad_x must be (n, channels)");
     let knots = cache
         .knots
         .as_ref()
@@ -1468,17 +1887,19 @@ fn backward_over<P: BackwardPull>(
     // calls this 300 times, and the 2026-08-17 fusion work established that the
     // allocator dominates this crate's kernels well before data traffic does.
     // Measured: the `Vec<Vec<f32>>` version cost 132.6 µs/epoch, this one 115.7.
+    //
+    // A block's partial is its raw moments, four per bank, channel and leaf. The blocks' moments are
+    // added and mapped through the leaf bases once per call (Nagare plan
+    // 2026-10-24-computed-parameters-once, Amendment 1): the fold ran once per block until then, and
+    // a micro-batched update runs many more blocks than a batched one (866 against 304 measured).
     let stride = block_stride(cache.n, cache.channels);
     let blocks = grad_x.len().div_ceil(stride).max(1);
-    let block_len = coefs.len() * len;
-    let mut partials = vec![0.0f32; blocks * block_len];
-
-    let banks: Vec<Slopes> = coefs
-        .iter()
-        .map(|coef| Slopes::slopes(coef, cache.channels, knots))
-        .collect();
+    let segs = knots.controls().len();
+    let per_bank = cache.channels * segs;
+    let block_len = banks.len() * per_bank;
+    let mut partials = vec![[0.0f32; 4]; blocks * block_len];
     let uniform = knots.is_uniform();
-    let kernel = |(block, (gx, local)): (usize, (&mut [f32], &mut [f32]))| {
+    let kernel = |(block, (gx, local)): (usize, (&mut [f32], &mut [[f32; 4]]))| {
         let span = block * stride..(block * stride + gx.len());
         let chunk = BackwardChunk {
             pull,
@@ -1489,9 +1910,9 @@ fn backward_over<P: BackwardPull>(
         };
         // One choice per call: uniform knots take the uniform segment arithmetic.
         if uniform {
-            backward_chunk::<true, _>(&banks, cache.channels, knots, chunk, local);
+            backward_chunk::<true, _>(banks, cache.channels, knots, chunk, local);
         } else {
-            backward_chunk::<false, _>(&banks, cache.channels, knots, chunk, local);
+            backward_chunk::<false, _>(banks, cache.channels, knots, chunk, local);
         }
     };
 
@@ -1519,12 +1940,42 @@ fn backward_over<P: BackwardPull>(
 
     // Summed in block order, which is fixed by the buffer layout and not by the
     // scheduler — this is what makes every bank's gradient thread-count independent.
-    let mut grad_coefs = vec![vec![0.0f32; len]; coefs.len()];
-    for local in partials.chunks(block_len) {
-        for (grad, values) in grad_coefs.iter_mut().zip(local.chunks(len)) {
-            for (acc, value) in grad.iter_mut().zip(values) {
-                *acc += value;
+    // The blocks' moments are added in `f64`: the fold cancels between them (the leaf bases mix `±1/2`, `1`, `5/2`),
+    // and a sum over every block grows them, so their `f32` sum would make the folded gradient about twice as
+    // inexact as folding each block on its own (measured: tests/fold_accuracy.rs).
+    fold_partials(banks, partials.chunks(block_len), (cache.channels, knots))
+}
+
+/// Each bank's control-point gradient from its blocks' partial moments (`[bank][channel][leaf]`, four each): the
+/// partials added in `f64` in the order given, then mapped through the leaf bases. The one reduction of every pullback
+/// ([`backward_tables`] and [`PreparedSpline::gradients`]).
+fn fold_partials<'p>(
+    banks: &[Slopes],
+    partials: impl Iterator<Item = &'p [[f32; 4]]>,
+    (channels, knots): (usize, &Knots),
+) -> Vec<Vec<f32>> {
+    let segs = knots.controls().len();
+    let per_bank = channels * segs;
+    let mut moments = vec![[0.0f64; 4]; banks.len() * per_bank];
+    for local in partials {
+        for (acc, value) in moments.iter_mut().zip(local) {
+            for (a, &v) in acc.iter_mut().zip(value) {
+                *a += f64::from(v);
             }
+        }
+    }
+    let mut grad_coefs = vec![vec![0.0f32; channels * knots.len()]; banks.len()];
+    for ((bank_grad, bank_moments), bank) in grad_coefs
+        .iter_mut()
+        .zip(moments.chunks_exact(per_bank))
+        .zip(banks)
+    {
+        for (ch, (channel_grad, channel_moments)) in bank_grad
+            .chunks_exact_mut(knots.len())
+            .zip(bank_moments.chunks_exact(segs))
+            .enumerate()
+        {
+            fold_moments(channel_moments, (knots, &bank.bases, ch), channel_grad);
         }
     }
     grad_coefs
@@ -1569,6 +2020,21 @@ pub fn chebyshev_control_points(
         }
     }
     out
+}
+
+/// Each bank of Chebyshev `terms` (`channels × k`) as the control points it generates at `grid` uniform knots, and the
+/// knot basis: the one composition every Chebyshev-CR forward and [`PreparedSpline::chebyshev`] share.
+fn chebyshev_controls(
+    terms: &[&[f32]],
+    channels: usize,
+    (grid, k): (usize, usize),
+) -> (Vec<Vec<f32>>, Vec<f32>) {
+    let basis = chebyshev_knot_basis(grid, k);
+    let controls = terms
+        .iter()
+        .map(|bank| chebyshev_control_points(bank, &basis, channels, grid, k))
+        .collect();
+    (controls, basis)
 }
 
 /// Forward Chebyshev-CR train path: generate CR control points, then run CR.
@@ -1625,11 +2091,7 @@ pub fn chebyshev_cr_banks_forward_into(
     (grid, k): (usize, usize),
     into: CatmullRomBanksBuffers<'_>,
 ) -> (Vec<Vec<f32>>, Vec<f32>) {
-    let basis = chebyshev_knot_basis(grid, k);
-    let controls: Vec<Vec<f32>> = coefs
-        .iter()
-        .map(|coef| chebyshev_control_points(coef, &basis, channels, grid, k))
-        .collect();
+    let (controls, basis) = chebyshev_controls(coefs, channels, (grid, k));
     let banks: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
     // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
     catmull_rom_banks_forward_into(&banks, x, n, channels, &Knots::uniform(grid), into);
@@ -1669,9 +2131,10 @@ pub fn chebyshev_cr_backward_into(
 
 /// The pullback of [`chebyshev_cr_banks_forward_into`]: each bank's Chebyshev-term gradient, projected
 /// from its control-point gradient, and the input gradient summed over the banks into `grad_x`
-/// ([`catmull_rom_banks_backward_into`]).
-pub fn chebyshev_cr_banks_backward_into(
-    controls: &[&[f32]],
+/// ([`catmull_rom_banks_backward_into`]). The control points' tables come from `controls` ([`TableSource`]):
+/// the forward's control points, or a [`PreparedSpline::chebyshev`] of the same terms.
+pub fn chebyshev_cr_banks_backward_into<'a>(
+    controls: impl Into<TableSource<'a>>,
     basis: &[f32],
     cache: &CatmullRomCache,
     grad_ys: &[&[f32]],
@@ -1680,7 +2143,9 @@ pub fn chebyshev_cr_banks_backward_into(
 ) -> Vec<Vec<f32>> {
     catmull_rom_banks_backward_into(controls, cache, grad_ys, grad_x)
         .iter()
-        .map(|cr_grad_coef| chebyshev_terms_gradient(cr_grad_coef, basis, cache, k))
+        .map(|cr_grad_coef| {
+            chebyshev_terms_gradient(cr_grad_coef, basis, (cache.channels, cache.grid, k))
+        })
         .collect()
 }
 
@@ -1697,11 +2162,7 @@ pub fn chebyshev_cr_routed_forward_into(
     (grid, k): (usize, usize),
     into: RoutedBuffers<'_>,
 ) -> (Vec<Vec<f32>>, Vec<f32>) {
-    let basis = chebyshev_knot_basis(grid, k);
-    let controls: Vec<Vec<f32>> = coefs
-        .iter()
-        .map(|coef| chebyshev_control_points(coef, &basis, channels, grid, k))
-        .collect();
+    let (controls, basis) = chebyshev_controls(coefs, channels, (grid, k));
     let banks: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
     // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
     catmull_rom_routed_forward_into(&banks, route, x, (n, channels), &Knots::uniform(grid), into);
@@ -1710,9 +2171,10 @@ pub fn chebyshev_cr_routed_forward_into(
 
 /// The pullback of [`chebyshev_cr_routed_forward_into`]: each bank's Chebyshev-term gradient, projected from its
 /// control-point gradient, and each element's input gradient from its routed bank, into `grad_x`
-/// ([`catmull_rom_routed_backward_into`]).
-pub fn chebyshev_cr_routed_backward_into(
-    controls: &[&[f32]],
+/// ([`catmull_rom_routed_backward_into`]). The control points' tables come from `controls` ([`TableSource`]), as in
+/// [`chebyshev_cr_banks_backward_into`].
+pub fn chebyshev_cr_routed_backward_into<'a>(
+    controls: impl Into<TableSource<'a>>,
     basis: &[f32],
     (cache, route): (&CatmullRomCache, &[u8]),
     grads: RoutedCotangents<'_>,
@@ -1721,7 +2183,9 @@ pub fn chebyshev_cr_routed_backward_into(
 ) -> Vec<Vec<f32>> {
     catmull_rom_routed_backward_into(controls, route, cache, grads, grad_x)
         .iter()
-        .map(|cr_grad_coef| chebyshev_terms_gradient(cr_grad_coef, basis, cache, k))
+        .map(|cr_grad_coef| {
+            chebyshev_terms_gradient(cr_grad_coef, basis, (cache.channels, cache.grid, k))
+        })
         .collect()
 }
 
@@ -1730,15 +2194,14 @@ pub fn chebyshev_cr_routed_backward_into(
 fn chebyshev_terms_gradient(
     cr_grad_coef: &[f32],
     basis: &[f32],
-    cache: &CatmullRomCache,
-    k: usize,
+    (channels, grid, k): (usize, usize, usize),
 ) -> Vec<f32> {
-    let mut grad_coef = vec![0.0; cache.channels * k];
-    for ch in 0..cache.channels {
+    let mut grad_coef = vec![0.0; channels * k];
+    for ch in 0..channels {
         for term in 0..k {
             let mut acc = 0.0;
-            for g in 0..cache.grid {
-                acc += cr_grad_coef[ch * cache.grid + g] * basis[g * k + term];
+            for g in 0..grid {
+                acc += cr_grad_coef[ch * grid + g] * basis[g * k + term];
             }
             grad_coef[ch * k + term] = acc;
         }

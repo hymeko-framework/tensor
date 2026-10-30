@@ -49,13 +49,14 @@ pub mod nurbs;
 pub use catmull_rom::{
     catmull_rom_backward, catmull_rom_backward_into, catmull_rom_banks_backward_into,
     catmull_rom_banks_forward_into, catmull_rom_forward, catmull_rom_forward_into,
-    catmull_rom_routed_backward_into, catmull_rom_routed_forward_into, chebyshev_control_points,
-    chebyshev_cr_backward, chebyshev_cr_backward_into, chebyshev_cr_banks_backward_into,
-    chebyshev_cr_banks_forward_into, chebyshev_cr_forward, chebyshev_cr_forward_into,
-    chebyshev_cr_routed_backward_into, chebyshev_cr_routed_forward_into, chebyshev_deploy_backward,
-    chebyshev_deploy_forward, chebyshev_knot_basis, CatmullRomBackward, CatmullRomBanksBuffers,
-    CatmullRomBuffers, CatmullRomCache, ChebyshevCrBackward, RoutedBuffers, RoutedCotangents,
-    PAR_MIN_ELEMS, SKIP,
+    catmull_rom_leaf_coefficients, catmull_rom_routed_backward_into,
+    catmull_rom_routed_forward_into, chebyshev_control_points, chebyshev_cr_backward,
+    chebyshev_cr_backward_into, chebyshev_cr_banks_backward_into, chebyshev_cr_banks_forward_into,
+    chebyshev_cr_forward, chebyshev_cr_forward_into, chebyshev_cr_routed_backward_into,
+    chebyshev_cr_routed_forward_into, chebyshev_deploy_backward, chebyshev_deploy_forward,
+    chebyshev_knot_basis, CatmullRomBackward, CatmullRomBanksBuffers, CatmullRomBuffers,
+    CatmullRomCache, ChebyshevCrBackward, Moments, PreparedSpline, RoutedBuffers, RoutedCotangents,
+    TableSource, PAR_MIN_ELEMS, SKIP,
 };
 pub use knots::{Knots, Tangents};
 pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};
