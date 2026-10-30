@@ -60,6 +60,9 @@ use rayon::prelude::*;
 
 use std::borrow::Cow;
 
+#[cfg(doc)]
+use crate::closed_form::ChebyshevClosedForm;
+use crate::closed_form::ClosedForm;
 use crate::knots::{Knots, Tangents};
 
 /// Row-parallelism is used only when `n * channels` reaches this many elements.
@@ -695,11 +698,13 @@ pub struct PreparedSpline {
 }
 
 /// The Chebyshev side of a [`PreparedSpline`] whose control points the terms generated: the knot basis, flat
-/// `(grid, k)`, and `k`.
+/// `(grid, k)`, `k`, and where the knots and `k` qualify, the closed form of the same banks (Nagare plan
+/// 2026-10-30-t2-algebraic-lowering; [`crate::closed_form`]).
 #[derive(Debug, Clone)]
 struct ChebyshevTerms {
     basis: Vec<f32>,
     k: usize,
+    closed: Option<ClosedForm>,
 }
 
 impl PreparedSpline {
@@ -744,10 +749,20 @@ impl PreparedSpline {
     pub fn chebyshev(terms: &[&[f32]], channels: usize, (grid, k): (usize, usize)) -> Self {
         let (controls, basis) = chebyshev_controls(terms, channels, (grid, k));
         let controls: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
+        let knots = Knots::uniform(grid);
+        let closed = ClosedForm::of(terms, channels, (&knots, k));
         Self {
-            terms: Some(ChebyshevTerms { basis, k }),
-            ..Self::banks(&controls, channels, &Knots::uniform(grid))
+            terms: Some(ChebyshevTerms { basis, k, closed }),
+            ..Self::banks(&controls, channels, &knots)
         }
+    }
+
+    /// The closed form of the banks (Nagare plan 2026-10-30-t2-algebraic-lowering): where the tables were built from
+    /// Chebyshev terms ([`Self::chebyshev`]) and the knots and term count qualify ([`ChebyshevClosedForm::of`]), the
+    /// same real functions as the tables, evaluated without them. `None` otherwise: the tables are the only execution.
+    #[must_use]
+    pub fn closed_form(&self) -> Option<&ClosedForm> {
+        self.terms.as_ref()?.closed.as_ref()
     }
 
     /// The channels the tables cover.
@@ -780,7 +795,10 @@ impl PreparedSpline {
     pub fn retained_floats(&self) -> usize {
         let polys: usize = self.polys.iter().map(|p| 4 * p.table.len()).sum();
         let slopes: usize = self.slopes.iter().map(|s| 3 * s.table.len()).sum();
-        polys + slopes + self.terms.as_ref().map_or(0, |t| t.basis.len())
+        let terms = self.terms.as_ref().map_or(0, |t| {
+            t.basis.len() + t.closed.as_ref().map_or(0, |c| c.planes().len())
+        });
+        polys + slopes + terms
     }
 }
 
