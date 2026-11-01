@@ -13,7 +13,7 @@ Extracted by grammar -- tree-sitter for Rust and C++, `ast` for Python -- so tha
 `pub(crate)`, a `pub fn` inside a private `mod`, and a `def` written inside a
 docstring are all excluded for a stated reason rather than by luck.
 
-**17 package(s), 443 public symbol(s).**
+**17 package(s), 461 public symbol(s).**
 
 ## hymeko-tensor-dev (rust)
 
@@ -365,6 +365,7 @@ _No public symbols._
 - `AsF32` — `hymeko_tensor/src/common.rs`
 - `AsF64` — `hymeko_tensor/src/common.rs`
 - `BoundedProblem` — `hymeko_tensor/src/contraction/bounded.rs`
+- `Constrained` — `hymeko_tensor/src/optimize.rs`
 - `ContractionVisitor` — `hymeko_tensor/src/contraction.rs`
 - `Dot` — `hymeko_tensor/src/tensor_val.rs`
 - `EdgeWeight` — `hymeko_tensor/src/tensor_val.rs`
@@ -386,6 +387,7 @@ _No public symbols._
 - `AllocationKey` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `ArenaConfig` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `ArenaStats` — `hymeko_tensor/src/compute/arena/mod.rs`
+- `AugmentedLagrangian` — `hymeko_tensor/src/optimize.rs`
 - `BoundedOutcome` — `hymeko_tensor/src/contraction/bounded.rs`
 - `BranchAndBound` — `hymeko_tensor/src/contraction/bounded.rs`
 - `CgOutcome` — `hymeko_tensor/src/linalg.rs`
@@ -397,6 +399,7 @@ _No public symbols._
 - `CooEntry` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `CooSoa` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `CsrStructure` — `hymeko_tensor/src/representations/sparse.rs`
+- `Dual` — `hymeko_tensor/src/dual.rs`
 - `EdgeWScalar` — `hymeko_tensor/src/tensor_val.rs`
 - `Host` — `hymeko_tensor/src/compute/arena/host.rs`
 - `HostArena` — `hymeko_tensor/src/compute/arena/host.rs`
@@ -412,6 +415,7 @@ _No public symbols._
 - `Ones` — `hymeko_tensor/src/conv/weight_init/mod.rs`
 - `PlanningBudget` — `hymeko_tensor/src/contraction.rs`
 - `PlanningOutcome` — `hymeko_tensor/src/contraction.rs`
+- `Point` — `hymeko_tensor/src/optimize.rs`
 - `Pool` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `PreparedMatrixChain` — `hymeko_tensor/src/contraction/matrix_chain.rs`
 - `RangeContraction` — `hymeko_tensor/src/operator/ranges.rs`
@@ -421,6 +425,7 @@ _No public symbols._
 - `RowContraction` — `hymeko_tensor/src/operator.rs`
 - `RowGather` — `hymeko_tensor/src/operator.rs`
 - `ShannonEntropy` — `hymeko_tensor/src/renyi.rs`
+- `Solution` — `hymeko_tensor/src/optimize.rs`
 - `SparseCsrShape` — `hymeko_tensor/src/compute/mod.rs`
 - `SparseShape` — `hymeko_tensor/src/representations/sparse.rs`
 - `SparseSpec` — `hymeko_tensor/src/sparse_workload.rs`
@@ -446,6 +451,7 @@ _No public symbols._
 - `PlanningError` — `hymeko_tensor/src/contraction.rs`
 - `ReusePolicy` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `SignAgg` — `hymeko_tensor/src/aggregation.rs`
+- `SolveError` — `hymeko_tensor/src/optimize.rs`
 - `SparseLayout` — `hymeko_tensor/src/representations/sparse.rs`
 - `SparseViolation` — `hymeko_tensor/src/representations/sparse.rs`
 - `StoredOrder` — `hymeko_tensor/src/representations/sparse.rs`
@@ -457,6 +463,7 @@ _No public symbols._
 - `accumulate_into` — `hymeko_tensor/src/operator/ranges.rs`
 - `accumulate_mapped` — `hymeko_tensor/src/operator/ranges.rs`
 - `acquire` — `hymeko_tensor/src/compute/arena/pool.rs`
+- `add` — `hymeko_tensor/src/dual.rs`
 - `admit` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `agg_sign` — `hymeko_tensor/src/aggregation.rs`
 - `agg_weight` — `hymeko_tensor/src/aggregation.rs`
@@ -479,6 +486,7 @@ _No public symbols._
 - `compute_degree_by_index` — `hymeko_tensor/src/conv/traits.rs`
 - `config` — `hymeko_tensor/src/compute/arena/host.rs`
 - `config` — `hymeko_tensor/src/compute/arena/pool.rs`
+- `constant` — `hymeko_tensor/src/dual.rs`
 - `contraction` — `hymeko_tensor/src/operator/ranges.rs`
 - `damped_least_squares` — `hymeko_tensor/src/linalg/dense.rs`
 - `decode` — `hymeko_tensor/src/stream.rs`
@@ -487,6 +495,7 @@ _No public symbols._
 - `dense_vector` — `hymeko_tensor/src/sparse_workload.rs`
 - `device_bytes` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `dimensions` — `hymeko_tensor/src/operator.rs`
+- `div` — `hymeko_tensor/src/dual.rs`
 - `elements` — `hymeko_tensor/src/compute/mod.rs`
 - `encode` — `hymeko_tensor/src/stream.rs`
 - `entry` — `hymeko_tensor/src/representations/tensor_coo.rs`
@@ -520,6 +529,8 @@ _No public symbols._
 - `matvec_t_into` — `hymeko_tensor/src/linalg.rs`
 - `medium` — `hymeko_tensor/src/sparse_workload.rs`
 - `mi_coeff` — `hymeko_tensor/src/renyi.rs`
+- `mul` — `hymeko_tensor/src/dual.rs`
+- `neg` — `hymeko_tensor/src/dual.rs`
 - `new` — `hymeko_tensor/src/compute/arena/host.rs`
 - `new` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `new` — `hymeko_tensor/src/compute/arena/pool.rs`
@@ -557,12 +568,14 @@ _No public symbols._
 - `retained_bytes` — `hymeko_tensor/src/operator/ranges.rs`
 - `row_ptr_len` — `hymeko_tensor/src/compute/mod.rs`
 - `s2_entropy` — `hymeko_tensor/src/renyi.rs`
+- `scale` — `hymeko_tensor/src/dual.rs`
 - `schema_expansion_2d` — `hymeko_tensor/src/arrow_schema.rs`
 - `schema_expansion_3d` — `hymeko_tensor/src/arrow_schema.rs`
 - `shape` — `hymeko_tensor/src/representations/sparse.rs`
 - `signed_incidence` — `hymeko_tensor/src/common.rs`
 - `small` — `hymeko_tensor/src/sparse_workload.rs`
 - `solve` — `hymeko_tensor/src/contraction/bounded.rs`
+- `solve` — `hymeko_tensor/src/optimize.rs`
 - `solve_in_place` — `hymeko_tensor/src/linalg/dense.rs`
 - `spmm` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `spmm_into` — `hymeko_tensor/src/representations/tensor_csr.rs`
@@ -578,6 +591,7 @@ _No public symbols._
 - `stats` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `steps` — `hymeko_tensor/src/contraction.rs`
 - `stored_order` — `hymeko_tensor/src/representations/sparse.rs`
+- `sub` — `hymeko_tensor/src/dual.rs`
 - `submit_session` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `take_pending` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `tensor` — `hymeko_tensor/src/representations/sparse.rs`
@@ -592,12 +606,16 @@ _No public symbols._
 - `validate_csr_parts` — `hymeko_tensor/src/representations/sparse.rs`
 - `validate_len` — `hymeko_tensor/src/compute/mod.rs`
 - `van_der_corput` — `hymeko_tensor/src/conv/weight_init/mod.rs`
+- `variable` — `hymeko_tensor/src/dual.rs`
+- `violation` — `hymeko_tensor/src/optimize.rs`
 - `weight_f32` — `hymeko_tensor/src/sparse_workload.rs`
+- `width` — `hymeko_tensor/src/dual.rs`
 - `with_capacity` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `with_gather` — `hymeko_tensor/src/operator.rs`
 - `with_meta` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `work` — `hymeko_tensor/src/contraction.rs`
 - `xavier_scale` — `hymeko_tensor/src/conv/weight_init/mod.rs`
+- `zero` — `hymeko_tensor/src/dual.rs`
 - `zeroed` — `hymeko_tensor/src/compute/arena/host.rs`
 
 ## hymeko-tensor-py (python)

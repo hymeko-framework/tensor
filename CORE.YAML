@@ -217,6 +217,11 @@ consumers:
   - ../nagare
 
 approved_edits:
+  - slug: constrained-optimization
+    date: 2026-11-01
+    authority: user approves moving the constrained solver and forward-mode duals out of transformation's hymeko_optimize into tensor
+    scope: new hymeko_tensor modules dual and optimize (augmented Lagrangian, Constrained trait), moved with the Newton solve on linalg::dense::solve_in_place; no new dependencies; direct tests
+    plan: docs/plans/2026-11-01-constrained-optimization/plan.md
   - slug: native-dev-dll
     date: 2026-10-28
     authority: user requests applying the same Core/Graph DLL development build to Tensor
