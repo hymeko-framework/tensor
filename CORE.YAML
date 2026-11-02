@@ -225,3 +225,50 @@ core:
 # `nagare` builds before proposing one.
 consumers:
   - ../nagare
+
+approved_edits:
+  - slug: constrained-optimization
+    date: 2026-11-01
+    authority: user approves moving the constrained solver and forward-mode duals out of transformation's hymeko_optimize into tensor
+    scope: new hymeko_tensor modules dual and optimize (augmented Lagrangian, Constrained trait), moved with the Newton solve on linalg::dense::solve_in_place; no new dependencies; direct tests
+    plan: docs/plans/2026-11-01-constrained-optimization/plan.md
+  - slug: native-dev-dll
+    date: 2026-10-28
+    authority: user requests applying the same Core/Graph DLL development build to Tensor
+    scope: downstream DLL re-exports and original-source correctness clients, Cargo aliases/profile and workspace cache isolation; preserve SSE4.1, optional features, production dependencies and arithmetic
+    plan: dev/README.txt
+  - slug: reusable-gmres-workspace
+    date: 2026-10-25
+    authority: user requests mathematical summary first, then fixes to GMRES storage and repeated work
+    scope: one hymeko_numerics workspace engine, preserved gmres facade, typed stopping tolerance, correctness and deterministic allocation checks; no new runtime dependencies or performance campaign
+    plan: docs/plans/2026-10-25-gmres-workspace/plan.pdf
+  - slug: ordered-parallel-source-pagerank
+    date: 2026-10-20
+    authority: user requests fixing vertex-number dependence, then parallel execution and Hymeko-based model/execution handling
+    scope: shared Core execution-coordinate views, mapped Tensor contraction, Graph planner/parallel consumer and compiled source policies; canonical IR and numeric certification preserved
+    plan: ../core/docs/plans/2026-09-07-compiler-repeated-work/plan.pdf
+  - slug: structural-pagerank
+    date: 2026-10-19
+    authority: user explicitly requests structural BnB integration and profile-guided acceleration
+    scope: shared bounded planner and range operators; canonical projection; component certificates; guarded PageRank; no new dependencies
+    plan: ../core/docs/plans/2026-09-07-compiler-repeated-work/plan.pdf
+  - slug: pagerank-fused-state
+    date: 2026-10-19
+    authority: user requests further improvement of the existing performance advantage
+    scope: ordered accumulator consume/reset and fused PageRank state sweep; exact numerical and allocation contracts; five-process hub/regions/chain/pair control explicitly authorized 2026-10-19
+    plan: ../core/docs/plans/2026-09-07-compiler-repeated-work/plan.pdf
+  - slug: contraction-runtime-cell-matroids
+    date: 2026-10-19
+    authority: user requests the proposed runtime measurement and matroids over cells
+    scope: Tensor chain execution on existing CSR kernel; Graph shared Levi engine over graded cells and canonical IR; correctness and explicit measurements
+    plan: ../core/docs/plans/2026-09-07-compiler-repeated-work/plan.pdf
+  - slug: virtual-operator-planning
+    date: 2026-10-19
+    authority: user explicitly requests implementing virtual operators, bounded planning and entropy-guided Berge search
+    scope: shared Tensor row contracts and planner; Core IR adapters; existing Graph PageRank and informed-search integration; correctness tests only
+    plan: ../core/docs/plans/2026-09-07-compiler-repeated-work/plan.pdf
+  - slug: budgeted-pool-reclamation
+    date: 2026-10-12
+    authority: user approved all catalogue algorithms and evening completion
+    scope: existing compute arena Pool; budgeted epoch checks; no dependencies or global allocator
+    plan: ../core/docs/plans/2026-09-07-compiler-repeated-work/plan.pdf

@@ -26,6 +26,10 @@
 //! | SPD / ridge | both solvers require SPD; a positive ridge on the diagonal is the caller's job |
 //! | factorisation order | column-major-inner `j ≤ i` loops, the classical Cholesky–Banachiewicz order |
 //! | failure | a non-positive pivot yields [`CholeskyError::NotPositiveDefinite`] with the offending index — never a panic, never a silent `NaN` |
+//!
+//! Small `f64` systems (kinematics, contact) have their own kernels and policies in [`dense`].
+
+pub mod dense;
 
 use crate::common::Real;
 

@@ -1,0 +1,56 @@
+[package]
+name = "hymeko-tensor-dev"
+version = "0.1.0"
+edition = "2021"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+description = "Original hymeko_tensor correctness clients through their owning shared library"
+
+[dependencies]
+hymeko_tensor = { package = "hymeko-tensor-dylib", path = "dylib/tensor" }
+
+[features]
+default = []
+sparse = ["hymeko_tensor/sparse"]
+interop = ["sparse", "hymeko_tensor/interop"]
+arrow-schema = ["hymeko_tensor/arrow-schema"]
+
+[dev-dependencies]
+blake3 = "1.8.3"
+
+[[test]]
+name = "compute_arena"
+path = "../hymeko_tensor/tests/compute_arena.rs"
+
+[[test]]
+name = "compute_vocabulary"
+path = "../hymeko_tensor/tests/compute_vocabulary.rs"
+
+[[test]]
+name = "contraction_planning"
+path = "../hymeko_tensor/tests/contraction_planning.rs"
+
+[[test]]
+name = "matrix_chain"
+path = "../hymeko_tensor/tests/matrix_chain.rs"
+required-features = ["sparse"]
+
+[[test]]
+name = "sparse_authority"
+path = "../hymeko_tensor/tests/sparse_authority.rs"
+required-features = ["sparse"]
+
+[[test]]
+name = "sparse_workload_kat"
+path = "../hymeko_tensor/tests/sparse_workload_kat.rs"
+required-features = ["sparse"]
+
+[[test]]
+name = "virtual_operators"
+path = "../hymeko_tensor/tests/virtual_operators.rs"
+
+[[test]]
+name = "weight_init"
+path = "../hymeko_tensor/tests/weight_init.rs"
