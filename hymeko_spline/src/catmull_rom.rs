@@ -739,17 +739,19 @@ impl PreparedSpline {
         }
     }
 
-    /// The tables of the control points each bank of Chebyshev `terms` (`channels × k`) generates at `grid` uniform
-    /// knots -- the same control points and knots [`chebyshev_cr_banks_forward_into`] forms -- with the knot basis kept
-    /// for the pullback's projection.
+    /// The tables of the control points each bank of Chebyshev `terms` (`channels × k`) generates on `grid`'s uniform
+    /// knots under its tangent rule -- the same control points and knots [`chebyshev_cr_banks_forward_into`] forms --
+    /// with the knot basis kept for the pullback's projection. `(grid, k)` is the chord rule.
     ///
     /// # Panics
     /// As [`Self::banks`], and when a bank is not `channels · k` terms.
     #[must_use]
-    pub fn chebyshev(terms: &[&[f32]], channels: usize, (grid, k): (usize, usize)) -> Self {
-        let (controls, basis) = chebyshev_controls(terms, channels, (grid, k));
+    pub fn chebyshev(terms: &[&[f32]], channels: usize, grid: impl Into<ChebyshevGrid>) -> Self {
+        let grid = grid.into();
+        let k = grid.k;
+        let (controls, basis) = chebyshev_controls(terms, channels, (grid.grid, k));
         let controls: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
-        let knots = Knots::uniform(grid);
+        let knots = grid.knots();
         let closed = ClosedForm::of(terms, channels, (&knots, k));
         Self {
             terms: Some(ChebyshevTerms { basis, k, closed }),
@@ -2040,6 +2042,60 @@ pub fn chebyshev_control_points(
     out
 }
 
+/// A Chebyshev--CR spline's grid: `grid` uniform knots, the tangent rule its control points are interpolated under,
+/// and the `k` Chebyshev terms read at those knots. `(grid, k)` is the chord rule, `(grid, k, tangents)` names one.
+///
+/// # Invariants
+/// The terms are read at the uniform knots whatever the rule, so the rule changes the interpolation only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChebyshevGrid {
+    grid: usize,
+    k: usize,
+    tangents: Tangents,
+}
+
+impl ChebyshevGrid {
+    /// The knots' count.
+    #[must_use]
+    pub const fn grid(&self) -> usize {
+        self.grid
+    }
+
+    /// The terms per channel.
+    #[must_use]
+    pub const fn k(&self) -> usize {
+        self.k
+    }
+
+    /// The tangent rule.
+    #[must_use]
+    pub const fn tangents(&self) -> Tangents {
+        self.tangents
+    }
+
+    /// The uniform knots under the grid's tangent rule.
+    #[must_use]
+    pub fn knots(&self) -> Knots {
+        Knots::uniform(self.grid).with_tangents(self.tangents)
+    }
+}
+
+impl From<(usize, usize)> for ChebyshevGrid {
+    fn from((grid, k): (usize, usize)) -> Self {
+        Self {
+            grid,
+            k,
+            tangents: Tangents::Chord,
+        }
+    }
+}
+
+impl From<(usize, usize, Tangents)> for ChebyshevGrid {
+    fn from((grid, k, tangents): (usize, usize, Tangents)) -> Self {
+        Self { grid, k, tangents }
+    }
+}
+
 /// Each bank of Chebyshev `terms` (`channels × k`) as the control points it generates at `grid` uniform knots, and the
 /// knot basis: the one composition every Chebyshev-CR forward and [`PreparedSpline::chebyshev`] share.
 fn chebyshev_controls(
@@ -2097,7 +2153,9 @@ pub fn chebyshev_cr_forward_into(
 
 /// [`chebyshev_cr_forward_into`] for several banks of Chebyshev terms over one input (tensor plan
 /// 2026-10-22-cr-banks): each bank's control points generated, then one banks forward
-/// ([`catmull_rom_banks_forward_into`]). Returns each bank's control points and the knot basis.
+/// ([`catmull_rom_banks_forward_into`]) on the grid's knots under its tangent rule ([`ChebyshevGrid`]; `(grid, k)` is
+/// the chord rule). Returns each bank's control points and the knot basis. The tape carries the knots, so the
+/// pullback ([`chebyshev_cr_banks_backward_into`]) interpolates under the same rule.
 ///
 /// # Preconditions
 /// At least one bank, each `channels · k` terms; `grid >= 3`; the buffers as the banks forward's.
@@ -2106,13 +2164,13 @@ pub fn chebyshev_cr_banks_forward_into(
     x: &[f32],
     n: usize,
     channels: usize,
-    (grid, k): (usize, usize),
+    grid: impl Into<ChebyshevGrid>,
     into: CatmullRomBanksBuffers<'_>,
 ) -> (Vec<Vec<f32>>, Vec<f32>) {
-    let (controls, basis) = chebyshev_controls(coefs, channels, (grid, k));
+    let grid = grid.into();
+    let (controls, basis) = chebyshev_controls(coefs, channels, (grid.grid, grid.k));
     let banks: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
-    // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
-    catmull_rom_banks_forward_into(&banks, x, n, channels, &Knots::uniform(grid), into);
+    catmull_rom_banks_forward_into(&banks, x, n, channels, &grid.knots(), into);
     (controls, basis)
 }
 
@@ -2168,7 +2226,8 @@ pub fn chebyshev_cr_banks_backward_into<'a>(
 }
 
 /// [`chebyshev_cr_banks_forward_into`] with each element evaluated on its routed bank alone, into one output
-/// ([`catmull_rom_routed_forward_into`]). Returns each bank's control points and the knot basis.
+/// ([`catmull_rom_routed_forward_into`]), on the grid's knots under its tangent rule. Returns each bank's control
+/// points and the knot basis.
 ///
 /// # Preconditions
 /// As [`chebyshev_cr_banks_forward_into`] with one output, and the routes as [`catmull_rom_routed_forward_into`]'s.
@@ -2177,13 +2236,13 @@ pub fn chebyshev_cr_routed_forward_into(
     route: &[u8],
     x: &[f32],
     (n, channels): (usize, usize),
-    (grid, k): (usize, usize),
+    grid: impl Into<ChebyshevGrid>,
     into: RoutedBuffers<'_>,
 ) -> (Vec<Vec<f32>>, Vec<f32>) {
-    let (controls, basis) = chebyshev_controls(coefs, channels, (grid, k));
+    let grid = grid.into();
+    let (controls, basis) = chebyshev_controls(coefs, channels, (grid.grid, grid.k));
     let banks: Vec<&[f32]> = controls.iter().map(Vec::as_slice).collect();
-    // The Chebyshev terms are read at the uniform knots, so the spline they generate is uniform.
-    catmull_rom_routed_forward_into(&banks, route, x, (n, channels), &Knots::uniform(grid), into);
+    catmull_rom_routed_forward_into(&banks, route, x, (n, channels), &grid.knots(), into);
     (controls, basis)
 }
 

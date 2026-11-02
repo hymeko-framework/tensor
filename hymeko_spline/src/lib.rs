@@ -39,7 +39,7 @@
 
 /// Catmull-Rom and Chebyshev-CR kernels on flat row-major `f32` slices.
 pub mod catmull_rom;
-/// The closed form of the uniform, chord-tangent Chebyshev--CR spline of at most three terms.
+/// The closed form of the uniform Chebyshev--CR spline of at most three terms, under chord or bounded tangents.
 pub mod closed_form;
 /// The knots a Catmull–Rom spline interpolates: a uniform base grid, each segment refined on a dyadic orthtree.
 pub mod knots;
@@ -57,9 +57,9 @@ pub use catmull_rom::{
     chebyshev_cr_forward, chebyshev_cr_forward_into, chebyshev_cr_routed_backward_into,
     chebyshev_cr_routed_forward_into, chebyshev_deploy_backward, chebyshev_deploy_forward,
     chebyshev_knot_basis, CatmullRomBackward, CatmullRomBanksBuffers, CatmullRomBuffers,
-    CatmullRomCache, ChebyshevCrBackward, Moments, PreparedSpline, RoutedBuffers, RoutedCotangents,
-    TableSource, PAR_MIN_ELEMS, SKIP,
+    CatmullRomCache, ChebyshevCrBackward, ChebyshevGrid, Moments, PreparedSpline, RoutedBuffers,
+    RoutedCotangents, TableSource, PAR_MIN_ELEMS, SKIP,
 };
-pub use closed_form::{ChebyshevClosedForm, ClosedForm, TermPlanes};
+pub use closed_form::{BoundedClosedForm, ChebyshevClosedForm, ClosedForm, KnotDefect, TermPlanes};
 pub use knots::{Knots, Tangents};
 pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};
