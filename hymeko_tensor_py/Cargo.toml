@@ -13,7 +13,7 @@ name = "hymeko_tensor_py"
 version = "0.1.0"
 edition = "2021"
 description = "Python (pyo3) bindings for the hymeko_tensor pillar: matrix-based Renyi-2 estimators and dense linear algebra."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 publish = false
 
 [lib]
