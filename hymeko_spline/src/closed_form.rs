@@ -164,6 +164,19 @@ pub struct KnotDefect {
 }
 
 impl KnotDefect {
+    /// The defect of parts read from [`BoundedClosedForm::defects`] (`knot`, `delta`, `d_delta`): for a consumer that
+    /// keeps them as one plane per part over its channel lanes, which a kernel reads contiguously (an array of
+    /// `KnotDefect` puts each part at the struct's stride).
+    #[inline]
+    #[must_use]
+    pub const fn new(knot: f32, delta: f32, d_delta: [f32; 2]) -> Self {
+        Self {
+            knot,
+            delta,
+            d_delta,
+        }
+    }
+
     /// The knot's index `k`, its bump centred at `u = k`.
     #[inline]
     #[must_use]
