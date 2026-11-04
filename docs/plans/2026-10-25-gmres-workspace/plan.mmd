@@ -1,6 +1,0 @@
-flowchart TD
-  IR[Canonical Core IR] --> Graph[Graph transition and L1 certificate]
-  Graph --> Numerics[Single Tensor GMRES implementation]
-  Physics[Diffusion and port-Hamiltonian operators] --> Numerics
-  Numerics --> Workspace[Caller-owned reusable basis and scratch]
-  Numerics --> Residual[True residual verification]
