@@ -1,78 +1,65 @@
-# tensor — HyMeKo Tensor pillar
+# tensor
 
-The mathematical foundation and streamed representation of the HyMeKo **Tensor** pillar, as a standalone Cargo
-workspace.
+Numerical storage, kernels and solvers for the HyMeKo framework, as one Cargo
+workspace. The canonical semantic IR lives in
+[core](https://github.com/hymeko-framework/core) and the hypergraph algorithms
+in [graph](https://github.com/hymeko-framework/graph); this workspace depends
+on neither.
 
 ## Crates
 
-- **`hymeko_tensor`** — matrix-based Rényi-α=2 information estimators (`renyi`: Gram, `S₂` entropy, mutual
-  information + gradient, Chebyshev features, stable rank) and the streamed HyMeKo IR format (`stream`:
-  `HyMeKoStream` = `{dims, single flat arena, cheby_order}` with a bit-exact encode/decode round-trip). Pure,
-  `std`-only, no dependencies.
-- **`hymeko_clifford`** — Clifford / geometric-algebra foundation: dense `Multivector<N>`, signature, blade product,
-  `Rotor`. `std`-only.
-- **`hymeko_spline`** -- spline activation kernels, with optional parallel execution.
-- **`hymeko_numerics`** -- matrix-free iterative solvers and reusable GMRES workspace.
-- **`hymeko_vision`** -- dependency-free vision primitives.
-- Graph algorithms belong to the separate `graph` repository.
+| Crate | Contents |
+|---|---|
+| `hymeko_tensor` | Scalar algebra, dense solvers (`linalg`), forward-mode duals (`dual`), box-bounded minimisation (`optimize`), matrix-based Rényi-2 estimators (`renyi`), parameter layout (`stream`), virtual sparse-row operators (`operator`), bounded contraction planning (`contraction`) and host compute arenas (`compute`) |
+| `hymeko_clifford` | Clifford algebra: metric signature, dense multivectors, blade product, rotors and reverse-mode gradients for rotor chains |
+| `hymeko_spline` | Catmull-Rom, Chebyshev-CR, Kochanek-Bartels and NURBS kernels on flat `f32` slices, their closed forms and orthtree knots |
+| `hymeko_numerics` | Matrix-free solvers: restarted GMRES with a reusable workspace, preconditioned CG, Lanczos, L-BFGS, trust region, ADMM, FAS multigrid, Gauss-Newton and IRLS least squares, weighted diffusion and port-Hamiltonian operators |
+| `hymeko_vision` | Skeleton rasterisation and masking primitives |
+| `hymeko_numeric_vv` | Verification of the crates above: frozen oracles, finite-difference checks and manifest gates; not published, and no production crate depends on it |
+| `hymeko_tensor_py` | Python (pyo3) bindings to `hymeko_tensor`; not published |
 
-## Provenance
+`hymeko_tensor`, `hymeko_clifford`, `hymeko_numerics` and `hymeko_vision` have
+no dependencies in their default builds. `hymeko_tensor` adds COO/CSR storage
+and Rayon kernels with `sparse`, Nalgebra conversion with `interop` and Arrow
+schemas with `arrow-schema`. `hymeko_spline` uses Rayon only with `parallel`;
+its results are byte-identical with the feature on or off.
 
-Extracted 2026-08-16 from `nagare` (`feat/auto-holonomy-arc`, examples/nagare_deep_signed.rs): the matrix-Rényi
-estimators and the streamed IR (`HyMeKoStream`) developed in the information-theoretic arc; `hymeko_clifford` /
-`hymeko_graph` mirrored from the framework. The Nagare learner still carries its own copies pending a rewire to
-depend on this workspace.
+## Use
 
-## Build
-
-`hymeko_numerics::GmresWorkspace` provides reusable, dependency-free restarted
-GMRES storage for `(I - theta S)x = b`. Its `solve` method accepts a `GmresConfig`
-with explicit `GmresTolerance::Relative` or `Absolute`, restart and iteration
-budget. The existing `gmres(...)` facade calls this same engine with a temporary
-workspace. Operator implementations still supply only `dim` and `apply`.
-
-The workspace retains a contiguous basis and the small Hessenberg/rotation
-buffers between restarts and calls. A warmed solve allocates nothing when its
-buffers fit retained capacity and the operator itself does not allocate. It
-retains O(n * restart) storage; this is not a claim of lower resident memory.
-The true residual is checked at return, and `Report::residual` remains relative
-even when the stopping threshold is absolute. The 144 pre-change regression
-cases preserve solution/residual bits, iteration counts and operator-call counts.
-
-The Hungarian mathematical summary is
-[`docs/gmres/mathematical-summary.pdf`](docs/gmres/mathematical-summary.pdf), with
-its LaTeX source beside it; the numerical owner,
-scope and verification plan are in `docs/plans/2026-10-25-gmres-workspace/`.
-This allocation refactor has no new latency measurement yet.
-
-The existing compute arena supports
-`Pool::reclaim_completed_budgeted(watermark, max_checks)`. Each call inspects at
-most `max_checks` retired resources; incomplete epochs rotate behind the others.
-Pending sessions remain protected and cache byte/buffer budgets still apply.
-The return value counts completed resources removed from retirement, including
-ones evicted instead of cached. The original `reclaim_completed` checks all
-currently retired resources through the same implementation. The budget bounds
-epoch checks; free-list eviction, allocation and backend destruction retain
-their existing costs. Reclamation visits resources in FIFO rotation order.
-
+```toml
+[dependencies]
+hymeko_tensor = { git = "https://github.com/hymeko-framework/tensor.git" }
+hymeko_numerics = { git = "https://github.com/hymeko-framework/tensor.git" }
 ```
-cargo build
+
+## Build and test
+
+```sh
 cargo test
+cargo test -p hymeko_tensor --features sparse
 cargo clippy --all-targets -- -D warnings
 ```
 
-## Native development with shared libraries
+`cargo test` covers the default members, every crate in the table.
+`.cargo/config.toml` enables SSE4.1 on x86-64, so the Catmull-Rom `floor`
+compiles to one instruction instead of a libm call; the results are
+bit-identical either way. The workspace does not track `Cargo.lock`.
 
-`cargo dev-test --test gmres_workspace` and `cargo dev-test --test virtual_operators`
-reuse the original public-API tests through the existing numerical libraries' DLLs.
-Four independent downstream clients keep Tensor, Numerics, Clifford and Spline
-build dependencies separate. Twenty-eight correctness targets are available;
-three sparse targets require `hymeko-tensor-dev/sparse`. Spline parallel execution
-is selected with `hymeko-spline-dev/parallel`. SSE4.1 and existing kernel contracts
-are preserved. See [the development linkage contract](dev/README.txt).
+The Python bindings build with [maturin](https://www.maturin.rs/) into one
+abi3 wheel for CPython 3.9 and later:
+`maturin build --release -m hymeko_tensor_py/pyproject.toml`.
 
-The alias uses a workspace-identified cache, so different source roots cannot
-silently reuse each other's binaries. Original production/default members,
-benchmark targets, allocator instrumentation, Python bindings and private unit
-tests retain their existing paths. This is development linkage, not a numerical
-algorithm or a runtime-memory optimization.
+`cargo dev-test` runs the integration tests against dynamic-library builds of
+the four production libraries, which shortens incremental rebuilds; it is
+described in [dev/README.txt](dev/README.txt). The default static build is
+unchanged by it.
+
+## Documentation
+
+[docs/gmres/mathematical-summary.pdf](docs/gmres/mathematical-summary.pdf) is a
+mathematical summary (in Hungarian) of the GMRES workspace, with its LaTeX
+source beside it.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
