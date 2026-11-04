@@ -416,3 +416,216 @@ impl<F: Real> SparseTensorContract for TensorCsr<F> {
         ))
     }
 }
+
+// ---------------------------------------------------------------------------
+// APPROVED-CORE-EDIT: csr-construction (2026-10-20, user chat: "de van jogosultságod" -- "if we do
+// not take this step we rewrite the CSR countless times").
+//
+// Additive: the constructions callers kept writing by hand -- a matrix written row by row (the
+// stateful case: an accumulator, a merge), a matrix from its rows, a symmetric matrix from its
+// diagonal and strict upper triangle, the transpose, the product, the diagonal. Nothing above changes. Every construction
+// is deterministic and keeps the sparse contract's stored order: a row is not re-sorted unless the
+// construction says so, and nothing is coalesced.
+// ---------------------------------------------------------------------------
+
+/// **A CSR matrix written row by row**: entries are pushed in stored order, [`Self::end_row`]
+/// closes a row, [`Self::finish`] returns the matrix. For a producer that computes each row from
+/// mutable state -- a sparse product's accumulator, a row merge -- without a buffer per row.
+#[derive(Debug, Clone)]
+pub struct CsrRowWriter<F> {
+    matrix: TensorCsr<F>,
+}
+
+impl<F: Real> CsrRowWriter<F> {
+    /// A writer for a matrix of `num_cols` columns, room reserved for `rows` rows and `nnz`
+    /// entries.
+    #[must_use]
+    pub fn with_capacity(num_cols: usize, rows: usize, nnz: usize) -> Self {
+        let mut row_ptr = Vec::with_capacity(rows + 1);
+        row_ptr.push(0);
+        Self {
+            matrix: TensorCsr {
+                num_rows: 0,
+                num_cols,
+                row_ptr,
+                col_ind: Vec::with_capacity(nnz),
+                val: Vec::with_capacity(nnz),
+            },
+        }
+    }
+
+    /// Append an entry to the open row.
+    ///
+    /// # Panics
+    /// If `col` is not below the column count.
+    #[inline]
+    pub fn push(&mut self, col: usize, value: F) {
+        assert!(
+            col < self.matrix.num_cols,
+            "column {col} of a matrix with {} columns",
+            self.matrix.num_cols
+        );
+        self.matrix.col_ind.push(col);
+        self.matrix.val.push(value);
+    }
+
+    /// Append the entries `cols[k], vals[k]` to the open row, as two slice copies.
+    ///
+    /// # Panics
+    /// If the slices differ in length, or a column is not below the column count.
+    pub fn extend_from_slices(&mut self, cols: &[usize], vals: &[F]) {
+        assert_eq!(cols.len(), vals.len(), "one value per column");
+        assert!(
+            cols.iter().all(|&c| c < self.matrix.num_cols),
+            "a column of a matrix with {} columns is out of range",
+            self.matrix.num_cols
+        );
+        self.matrix.col_ind.extend_from_slice(cols);
+        self.matrix.val.extend_from_slice(vals);
+    }
+
+    /// Close the open row (an empty row when nothing was pushed).
+    #[inline]
+    pub fn end_row(&mut self) {
+        self.matrix.row_ptr.push(self.matrix.col_ind.len());
+        self.matrix.num_rows += 1;
+    }
+
+    /// The matrix of the closed rows; entries pushed after the last [`Self::end_row`] are dropped.
+    #[must_use]
+    pub fn finish(mut self) -> TensorCsr<F> {
+        let closed = self.matrix.row_ptr[self.matrix.num_rows];
+        self.matrix.col_ind.truncate(closed);
+        self.matrix.val.truncate(closed);
+        self.matrix
+    }
+}
+
+impl<F: Real> TensorCsr<F> {
+    /// **The matrix of `rows`** over `num_cols` columns, each row's entries in the order given --
+    /// [`StoredOrder::RowMajorRowsThenStored`]: not sorted, not coalesced. A caller that needs
+    /// ascending columns gives its rows sorted.
+    ///
+    /// # Panics
+    /// If an entry's column is not below `num_cols`.
+    pub fn from_rows<I, R>(rows: I, num_cols: usize) -> Self
+    where
+        I: IntoIterator<Item = R>,
+        R: IntoIterator<Item = (usize, F)>,
+    {
+        let mut writer = CsrRowWriter::with_capacity(num_cols, 0, 0);
+        for row in rows {
+            for (c, v) in row {
+                writer.push(c, v);
+            }
+            writer.end_row();
+        }
+        writer.finish()
+    }
+
+    /// **The symmetric matrix** with diagonal `diagonal` and strict upper triangle `upper` as
+    /// `(row, column, value)`, `row < column`: every row holds its diagonal entry and its
+    /// off-diagonal entries from both triangles, columns ascending (a stable sort, so repeated
+    /// pairs keep their order in `upper`). The layout normal equations and the SPD solvers use.
+    ///
+    /// # Panics
+    /// If an index of `upper` is not below `diagonal.len()`.
+    pub fn from_symmetric(diagonal: &[F], upper: &[(u32, u32, F)]) -> Self {
+        let n = diagonal.len();
+        let mut rows: Vec<Vec<(usize, F)>> = diagonal
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| vec![(i, d)])
+            .collect();
+        for &(i, j, v) in upper {
+            rows[i as usize].push((j as usize, v));
+            rows[j as usize].push((i as usize, v));
+        }
+        for row in &mut rows {
+            row.sort_by_key(|&(c, _)| c);
+        }
+        Self::from_rows(rows, n)
+    }
+
+    /// **The product `self · rhs`** by Gustavson's row-by-row accumulation: row `r` of the result
+    /// sums `self[r, k] · rhs[k, ·]` over row `r`'s entries in stored order, and holds every column
+    /// it touched -- in ascending order, exact zeros from cancellation included (a caller that wants
+    /// them gone filters). Each entry's sum runs in a fixed order, so the product is deterministic.
+    ///
+    /// # Panics
+    /// If `self.num_cols != rhs.num_rows`.
+    #[must_use]
+    pub fn matmul(&self, rhs: &Self) -> Self {
+        assert_eq!(
+            self.num_cols, rhs.num_rows,
+            "a product needs the left operand's columns to be the right one's rows"
+        );
+        let mut values = vec![F::zero(); rhs.num_cols];
+        let mut touched_flag = vec![false; rhs.num_cols];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut out = CsrRowWriter::with_capacity(rhs.num_cols, self.num_rows, 0);
+        for r in 0..self.num_rows {
+            for at in self.row_ptr[r]..self.row_ptr[r + 1] {
+                let (k, a) = (self.col_ind[at], self.val[at]);
+                for bt in rhs.row_ptr[k]..rhs.row_ptr[k + 1] {
+                    let c = rhs.col_ind[bt];
+                    if !touched_flag[c] {
+                        touched_flag[c] = true;
+                        touched.push(c);
+                    }
+                    values[c] += a * rhs.val[bt];
+                }
+            }
+            touched.sort_unstable();
+            for &c in &touched {
+                out.push(c, values[c]);
+                values[c] = F::zero();
+                touched_flag[c] = false;
+            }
+            touched.clear();
+            out.end_row();
+        }
+        out.finish()
+    }
+
+    /// The diagonal: entry `i` sums row `i`'s stored entries in column `i` (zero when there is
+    /// none), over `min(rows, columns)`.
+    #[must_use]
+    pub fn diagonal(&self) -> Vec<F> {
+        (0..self.num_rows.min(self.num_cols))
+            .map(|i| {
+                (self.row_ptr[i]..self.row_ptr[i + 1])
+                    .filter(|&at| self.col_ind[at] == i)
+                    .fold(F::zero(), |sum, at| sum + self.val[at])
+            })
+            .collect()
+    }
+
+    /// **The transpose**: row `c` of the result lists column `c`'s entries in ascending row order
+    /// of `self`, and within one row of `self` in its stored order (a stable counting sort).
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        let mut counts = vec![0usize; self.num_cols];
+        for &c in &self.col_ind {
+            counts[c] += 1;
+        }
+        let (row_ptr, nnz) = build_row_ptr(&counts);
+        let mut next = row_ptr.clone();
+        let (mut col_ind, mut val) = (vec![0usize; nnz], vec![F::zero(); nnz]);
+        for r in 0..self.num_rows {
+            for k in self.row_ptr[r]..self.row_ptr[r + 1] {
+                let c = self.col_ind[k];
+                col_ind[next[c]] = r;
+                val[next[c]] = self.val[k];
+                next[c] += 1;
+            }
+        }
+        Self {
+            num_rows: self.num_cols,
+            num_cols: self.num_rows,
+            row_ptr,
+            col_ind,
+            val,
+        }
+    }
+}

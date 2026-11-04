@@ -1,0 +1,2 @@
+# Zero-dimensional solutions have an empty final TSV column; its delimiter is data.
+gmres-before.tsv whitespace=-blank-at-eol

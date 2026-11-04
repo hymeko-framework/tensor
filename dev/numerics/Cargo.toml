@@ -1,0 +1,24 @@
+[package]
+name = "hymeko-numerics-dev"
+version = "0.1.0"
+edition = "2021"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+description = "Original hymeko_numerics correctness clients through their owning shared library"
+
+[dependencies]
+hymeko_numerics = { package = "hymeko-numerics-dylib", path = "../dylib/numerics" }
+
+[[test]]
+name = "gmres_workspace"
+path = "../../hymeko_numerics/tests/gmres_workspace.rs"
+
+[[test]]
+name = "port_hamiltonian"
+path = "../../hymeko_numerics/tests/port_hamiltonian.rs"
+
+[[test]]
+name = "solver"
+path = "../../hymeko_numerics/tests/solver.rs"

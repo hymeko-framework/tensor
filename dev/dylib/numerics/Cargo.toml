@@ -1,0 +1,14 @@
+[package]
+name = "hymeko-numerics-dylib"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Native development linkage for the existing hymeko_numerics library"
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[dependencies]
+implementation = { package = "hymeko_numerics", path = "../../../hymeko_numerics", default-features = false }

@@ -14,3 +14,7 @@
 # bit-identical metrics across the flag.
 [target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-feature=+sse4.1"]
+
+# Keep identical package names from different source roots in distinct caches.
+[alias]
+dev-test = ["test", "--profile", "dev-dll", "--config", "build.build-dir=\"{cargo-cache-home}/hymeko-dev-build/{workspace-path-hash}\"", "-p", "hymeko-tensor-dev", "-p", "hymeko-numerics-dev", "-p", "hymeko-clifford-dev", "-p", "hymeko-spline-dev"]

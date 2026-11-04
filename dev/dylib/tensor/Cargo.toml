@@ -1,0 +1,20 @@
+[package]
+name = "hymeko-tensor-dylib"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Native development linkage for the existing hymeko_tensor library"
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[dependencies]
+implementation = { package = "hymeko_tensor", path = "../../../hymeko_tensor", default-features = false }
+
+[features]
+default = []
+sparse = ["implementation/sparse"]
+interop = ["sparse", "implementation/interop"]
+arrow-schema = ["implementation/arrow-schema"]

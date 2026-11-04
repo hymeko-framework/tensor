@@ -1,0 +1,18 @@
+[package]
+name = "hymeko-spline-dylib"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Native development linkage for the existing hymeko_spline library"
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[dependencies]
+implementation = { package = "hymeko_spline", path = "../../../hymeko_spline", default-features = false }
+
+[features]
+default = []
+parallel = ["implementation/parallel"]
