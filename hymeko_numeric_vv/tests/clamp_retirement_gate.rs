@@ -129,7 +129,7 @@ fn a_legacy_saturated_gradient_cannot_pass_the_canonical_contract() {
         .collect();
     let x = frozen::saturating_probe(N, CH);
 
-    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
     let legacy = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
 

@@ -33,14 +33,10 @@ use super::se_fixed::Se3;
 
 // --- small dense helpers, row-major 3x3 --------------------------------------------------------
 
-/// `a x b`.
+/// `a x b`, by value from references: the crate's one cross product.
 #[inline]
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    super::vector::cross(*a, *b)
 }
 
 /// The matrix `t x`, so that `skew(t) . v == cross(&t, &v)`.

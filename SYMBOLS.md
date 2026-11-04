@@ -13,7 +13,7 @@ Extracted by grammar -- tree-sitter for Rust and C++, `ast` for Python -- so tha
 `pub(crate)`, a `pub fn` inside a private `mod`, and a `def` written inside a
 docstring are all excluded for a stated reason rather than by luck.
 
-**17 package(s), 461 public symbol(s).**
+**17 package(s), 607 public symbol(s).**
 
 ## hymeko-tensor-dev (rust)
 
@@ -135,6 +135,7 @@ _No public symbols._
 - `compose` — `hymeko_clifford/src/algebra/se.rs`
 - `compose` — `hymeko_clifford/src/algebra/se_fixed.rs`
 - `cotree_residuals` — `hymeko_clifford/src/algebra/connection.rs`
+- `cross` — `hymeko_clifford/src/algebra/vector.rs`
 - `cross_force` — `hymeko_clifford/src/algebra/spatial.rs`
 - `cross_motion` — `hymeko_clifford/src/algebra/spatial.rs`
 - `curvature_energy` — `hymeko_clifford/src/algebra/connection.rs`
@@ -168,6 +169,8 @@ _No public symbols._
 - `q_at` — `hymeko_clifford/src/algebra/rotor.rs`
 - `quat_conjugate` — `hymeko_clifford/src/algebra/rotor.rs`
 - `quat_mul` — `hymeko_clifford/src/algebra/rotor.rs`
+- `quat_mul_lanes` — `hymeko_clifford/src/algebra/lanes.rs`
+- `quat_norm_sq_lanes` — `hymeko_clifford/src/algebra/lanes.rs`
 - `quat_rotate` — `hymeko_clifford/src/algebra/rotor.rs`
 - `quaternion` — `hymeko_clifford/src/algebra/se_fixed.rs`
 - `reverse` — `hymeko_clifford/src/algebra/multivector.rs`
@@ -248,25 +251,68 @@ _No public symbols._
 
 ### traits
 
+- `Arithmetic` — `hymeko_numerics/src/robust.rs`
+- `FasHierarchy` — `hymeko_numerics/src/fas.rs`
+- `FasLevel` — `hymeko_numerics/src/fas.rs`
+- `IncrementSolver` — `hymeko_numerics/src/least_squares.rs`
+- `LeastSquares` — `hymeko_numerics/src/least_squares.rs`
+- `Objective` — `hymeko_numerics/src/lbfgs.rs`
 - `Operator` — `hymeko_numerics/src/lib.rs`
+- `Preconditioner` — `hymeko_numerics/src/pcg.rs`
+- `ProximalBlock` — `hymeko_numerics/src/admm.rs`
+- `RobustKernel` — `hymeko_numerics/src/robust.rs`
+- `ScaleSchedule` — `hymeko_numerics/src/robust.rs`
+- `TrustRegionModel` — `hymeko_numerics/src/trust_region.rs`
+- `WeightedSolve` — `hymeko_numerics/src/robust.rs`
 
 ### structs
 
+- `Additive` — `hymeko_numerics/src/pcg.rs`
+- `Admm` — `hymeko_numerics/src/admm.rs`
+- `AdmmReport` — `hymeko_numerics/src/admm.rs`
+- `Cauchy` — `hymeko_numerics/src/robust.rs`
 - `Diffusion` — `hymeko_numerics/src/diffusion.rs`
+- `Fas` — `hymeko_numerics/src/fas.rs`
+- `FasReport` — `hymeko_numerics/src/fas.rs`
+- `FixedScale` — `hymeko_numerics/src/robust.rs`
+- `GaussNewton` — `hymeko_numerics/src/least_squares.rs`
+- `GaussNewtonModel` — `hymeko_numerics/src/trust_region.rs`
+- `GaussNewtonReport` — `hymeko_numerics/src/least_squares.rs`
+- `GaussNewtonRuns` — `hymeko_numerics/src/robust.rs`
 - `GmresConfig` — `hymeko_numerics/src/krylov.rs`
 - `GmresWorkspace` — `hymeko_numerics/src/krylov.rs`
+- `Graduated` — `hymeko_numerics/src/robust.rs`
+- `Huber` — `hymeko_numerics/src/robust.rs`
+- `Identity` — `hymeko_numerics/src/pcg.rs`
 - `Interconnection` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `Jacobi` — `hymeko_numerics/src/pcg.rs`
+- `Lanczos` — `hymeko_numerics/src/lanczos.rs`
+- `Lbfgs` — `hymeko_numerics/src/lbfgs.rs`
+- `LbfgsReport` — `hymeko_numerics/src/lbfgs.rs`
+- `LevenbergMarquardt` — `hymeko_numerics/src/least_squares.rs`
+- `LmReport` — `hymeko_numerics/src/least_squares.rs`
+- `MedianWithFloor` — `hymeko_numerics/src/robust.rs`
+- `NormalSystem` — `hymeko_numerics/src/least_squares.rs`
 - `NormalisedFlow` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `PcgIncrement` — `hymeko_numerics/src/least_squares.rs`
+- `PcgProgress` — `hymeko_numerics/src/pcg.rs`
 - `Port` — `hymeko_numerics/src/port_hamiltonian.rs`
 - `PortHamiltonian` — `hymeko_numerics/src/port_hamiltonian.rs`
 - `Report` — `hymeko_numerics/src/lib.rs`
+- `Reweight` — `hymeko_numerics/src/robust.rs`
+- `Ritz` — `hymeko_numerics/src/lanczos.rs`
+- `SteihaugStep` — `hymeko_numerics/src/trust_region.rs`
+- `TrustRegion` — `hymeko_numerics/src/trust_region.rs`
+- `TrustRegionReport` — `hymeko_numerics/src/trust_region.rs`
 
 ### enums
 
 - `GmresTolerance` — `hymeko_numerics/src/krylov.rs`
+- `StepEnding` — `hymeko_numerics/src/trust_region.rs`
 
 ### functions
 
+- `admm` — `hymeko_numerics/src/admm.rs`
 - `apply` — `hymeko_numerics/src/port_hamiltonian.rs`
 - `balance_residual` — `hymeko_numerics/src/port_hamiltonian.rs`
 - `cg_normal` — `hymeko_numerics/src/lib.rs`
@@ -276,25 +322,37 @@ _No public symbols._
 - `dot` — `hymeko_numerics/src/lib.rs`
 - `edge` — `hymeko_numerics/src/port_hamiltonian.rs`
 - `energy` — `hymeko_numerics/src/diffusion.rs`
+- `fas` — `hymeko_numerics/src/fas.rs`
 - `flow` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `gauss_newton` — `hymeko_numerics/src/least_squares.rs`
 - `gmres` — `hymeko_numerics/src/lib.rs`
 - `hamiltonian` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `irls` — `hymeko_numerics/src/robust.rs`
 - `is_empty` — `hymeko_numerics/src/diffusion.rs`
+- `lanczos` — `hymeko_numerics/src/lanczos.rs`
+- `lbfgs` — `hymeko_numerics/src/lbfgs.rs`
 - `len` — `hymeko_numerics/src/diffusion.rs`
+- `levenberg_marquardt` — `hymeko_numerics/src/least_squares.rs`
 - `new` — `hymeko_numerics/src/diffusion.rs`
 - `new` — `hymeko_numerics/src/krylov.rs`
 - `new` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `new` — `hymeko_numerics/src/robust.rs`
 - `norm` — `hymeko_numerics/src/lib.rs`
 - `normalise` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `of` — `hymeko_numerics/src/pcg.rs`
 - `operator` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `pcg` — `hymeko_numerics/src/pcg.rs`
 - `ports` — `hymeko_numerics/src/port_hamiltonian.rs`
 - `quantity` — `hymeko_numerics/src/diffusion.rs`
 - `remap` — `hymeko_numerics/src/diffusion.rs`
 - `retained_bytes` — `hymeko_numerics/src/krylov.rs`
 - `richardson` — `hymeko_numerics/src/lib.rs`
 - `solve` — `hymeko_numerics/src/krylov.rs`
+- `steihaug` — `hymeko_numerics/src/trust_region.rs`
 - `step` — `hymeko_numerics/src/diffusion.rs`
 - `step` — `hymeko_numerics/src/port_hamiltonian.rs`
+- `tridiagonal_eigh` — `hymeko_numerics/src/lanczos.rs`
+- `trust_region` — `hymeko_numerics/src/trust_region.rs`
 
 ## hymeko_spline (rust)
 
@@ -304,39 +362,111 @@ _No public symbols._
 
 ### structs
 
+- `BoundedClosedForm` — `hymeko_spline/src/closed_form.rs`
 - `CatmullRomBackward` — `hymeko_spline/src/catmull_rom.rs`
+- `CatmullRomBanksBuffers` — `hymeko_spline/src/catmull_rom.rs`
 - `CatmullRomBuffers` — `hymeko_spline/src/catmull_rom.rs`
 - `CatmullRomCache` — `hymeko_spline/src/catmull_rom.rs`
+- `ChebyshevClosedForm` — `hymeko_spline/src/closed_form.rs`
 - `ChebyshevCrBackward` — `hymeko_spline/src/catmull_rom.rs`
+- `ChebyshevGrid` — `hymeko_spline/src/catmull_rom.rs`
+- `ClosedForm` — `hymeko_spline/src/closed_form.rs`
 - `CurveSample` — `hymeko_spline/src/nurbs.rs`
 - `KbBackward` — `hymeko_spline/src/kochanek_bartels.rs`
 - `KbCache` — `hymeko_spline/src/kochanek_bartels.rs`
+- `KnotDefect` — `hymeko_spline/src/closed_form.rs`
+- `Knots` — `hymeko_spline/src/knots.rs`
+- `Moments` — `hymeko_spline/src/catmull_rom.rs`
 - `NurbsCurve` — `hymeko_spline/src/nurbs.rs`
+- `PreparedSpline` — `hymeko_spline/src/catmull_rom.rs`
+- `RoutedBuffers` — `hymeko_spline/src/catmull_rom.rs`
+- `RoutedCotangents` — `hymeko_spline/src/catmull_rom.rs`
+- `TermPlanes` — `hymeko_spline/src/closed_form.rs`
 
 ### enums
 
 - `NurbsError` — `hymeko_spline/src/nurbs.rs`
+- `TableSource` — `hymeko_spline/src/catmull_rom.rs`
+- `Tangents` — `hymeko_spline/src/knots.rs`
 
 ### functions
 
+- `bank` — `hymeko_spline/src/closed_form.rs`
+- `bank_count` — `hymeko_spline/src/catmull_rom.rs`
+- `bank_mut` — `hymeko_spline/src/catmull_rom.rs`
+- `banks` — `hymeko_spline/src/catmull_rom.rs`
+- `banks` — `hymeko_spline/src/closed_form.rs`
+- `banks_mut` — `hymeko_spline/src/catmull_rom.rs`
+- `basis` — `hymeko_spline/src/closed_form.rs`
+- `basis_slopes` — `hymeko_spline/src/closed_form.rs`
 - `catmull_rom_backward` — `hymeko_spline/src/catmull_rom.rs`
 - `catmull_rom_backward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `catmull_rom_banks_backward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `catmull_rom_banks_forward_into` — `hymeko_spline/src/catmull_rom.rs`
 - `catmull_rom_forward` — `hymeko_spline/src/catmull_rom.rs`
 - `catmull_rom_forward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `catmull_rom_leaf_coefficients` — `hymeko_spline/src/catmull_rom.rs`
+- `catmull_rom_routed_backward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `catmull_rom_routed_forward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `channels` — `hymeko_spline/src/catmull_rom.rs`
+- `channels` — `hymeko_spline/src/closed_form.rs`
+- `chebyshev` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_control_points` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_cr_backward` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_cr_backward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `chebyshev_cr_banks_backward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `chebyshev_cr_banks_forward_into` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_cr_forward` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_cr_forward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `chebyshev_cr_routed_backward_into` — `hymeko_spline/src/catmull_rom.rs`
+- `chebyshev_cr_routed_forward_into` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_deploy_backward` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_deploy_forward` — `hymeko_spline/src/catmull_rom.rs`
 - `chebyshev_knot_basis` — `hymeko_spline/src/catmull_rom.rs`
+- `chebyshev_terms` — `hymeko_spline/src/catmull_rom.rs`
+- `closed_form` — `hymeko_spline/src/catmull_rom.rs`
+- `correction` — `hymeko_spline/src/closed_form.rs`
+- `d_delta` — `hymeko_spline/src/closed_form.rs`
+- `defects` — `hymeko_spline/src/closed_form.rs`
+- `delta` — `hymeko_spline/src/closed_form.rs`
+- `depths` — `hymeko_spline/src/knots.rs`
 - `domain` — `hymeko_spline/src/nurbs.rs`
+- `form` — `hymeko_spline/src/closed_form.rs`
+- `gradients` — `hymeko_spline/src/catmull_rom.rs`
+- `grid` — `hymeko_spline/src/catmull_rom.rs`
+- `grid` — `hymeko_spline/src/knots.rs`
+- `is_empty` — `hymeko_spline/src/closed_form.rs`
+- `is_empty` — `hymeko_spline/src/knots.rs`
+- `is_uniform` — `hymeko_spline/src/knots.rs`
+- `k` — `hymeko_spline/src/catmull_rom.rs`
+- `k` — `hymeko_spline/src/closed_form.rs`
 - `kb_backward` — `hymeko_spline/src/kochanek_bartels.rs`
 - `kb_forward` — `hymeko_spline/src/kochanek_bartels.rs`
+- `knot` — `hymeko_spline/src/closed_form.rs`
+- `knots` — `hymeko_spline/src/catmull_rom.rs`
+- `leaves` — `hymeko_spline/src/catmull_rom.rs`
+- `len` — `hymeko_spline/src/closed_form.rs`
+- `len` — `hymeko_spline/src/knots.rs`
+- `locate_row` — `hymeko_spline/src/catmull_rom.rs`
+- `moments` — `hymeko_spline/src/catmull_rom.rs`
+- `new` — `hymeko_spline/src/catmull_rom.rs`
+- `new` — `hymeko_spline/src/closed_form.rs`
 - `new` — `hymeko_spline/src/nurbs.rs`
+- `of` — `hymeko_spline/src/closed_form.rs`
+- `planes` — `hymeko_spline/src/closed_form.rs`
+- `positions` — `hymeko_spline/src/knots.rs`
+- `power_table` — `hymeko_spline/src/catmull_rom.rs`
+- `refined` — `hymeko_spline/src/knots.rs`
+- `refined_by_density` — `hymeko_spline/src/knots.rs`
 - `retained_floats` — `hymeko_spline/src/catmull_rom.rs`
 - `sample` — `hymeko_spline/src/nurbs.rs`
+- `slope_table` — `hymeko_spline/src/catmull_rom.rs`
+- `tangents` — `hymeko_spline/src/catmull_rom.rs`
+- `tangents` — `hymeko_spline/src/knots.rs`
+- `terms_gradient` — `hymeko_spline/src/closed_form.rs`
+- `transfer` — `hymeko_spline/src/knots.rs`
+- `uniform` — `hymeko_spline/src/knots.rs`
+- `with_tangents` — `hymeko_spline/src/knots.rs`
 
 ## hymeko_spline (python)
 
@@ -398,6 +528,7 @@ _No public symbols._
 - `ContractionStep` — `hymeko_tensor/src/contraction.rs`
 - `CooEntry` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `CooSoa` — `hymeko_tensor/src/representations/tensor_coo.rs`
+- `CsrRowWriter` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `CsrStructure` — `hymeko_tensor/src/representations/sparse.rs`
 - `Dual` — `hymeko_tensor/src/dual.rs`
 - `EdgeWScalar` — `hymeko_tensor/src/tensor_val.rs`
@@ -470,6 +601,7 @@ _No public symbols._
 - `allocate` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `arena_len` — `hymeko_tensor/src/stream.rs`
 - `as_str` — `hymeko_tensor/src/compute/mod.rs`
+- `back_solve_into` — `hymeko_tensor/src/linalg.rs`
 - `below` — `hymeko_tensor/src/sparse_workload.rs`
 - `bits` — `hymeko_tensor/src/renyi.rs`
 - `block_len` — `hymeko_tensor/src/stream.rs`
@@ -480,6 +612,7 @@ _No public symbols._
 - `cg_matrix_free` — `hymeko_tensor/src/linalg.rs`
 - `cheby_features` — `hymeko_tensor/src/renyi.rs`
 - `checked_elements` — `hymeko_tensor/src/compute/mod.rs`
+- `cholesky_lower_into` — `hymeko_tensor/src/linalg.rs`
 - `clamp01` — `hymeko_tensor/src/aggregation.rs`
 - `class` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `coalescing` — `hymeko_tensor/src/representations/sparse.rs`
@@ -494,19 +627,27 @@ _No public symbols._
 - `dense_cholesky_solve` — `hymeko_tensor/src/linalg.rs`
 - `dense_vector` — `hymeko_tensor/src/sparse_workload.rs`
 - `device_bytes` — `hymeko_tensor/src/compute/arena/mod.rs`
+- `diagonal` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `dimensions` — `hymeko_tensor/src/operator.rs`
 - `div` — `hymeko_tensor/src/dual.rs`
+- `dot` — `hymeko_tensor/src/linalg.rs`
 - `elements` — `hymeko_tensor/src/compute/mod.rs`
 - `encode` — `hymeko_tensor/src/stream.rs`
+- `end_row` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `entry` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `execute` — `hymeko_tensor/src/contraction.rs`
 - `execute` — `hymeko_tensor/src/contraction/matrix_chain.rs`
+- `extend_from_slices` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `extents` — `hymeko_tensor/src/contraction.rs`
 - `extents` — `hymeko_tensor/src/representations/sparse.rs`
 - `factors` — `hymeko_tensor/src/contraction.rs`
 - `finalize_coalesced` — `hymeko_tensor/src/representations/tensor_csr_builder_impl.rs`
+- `finish` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `for_overwrite` — `hymeko_tensor/src/compute/arena/host.rs`
+- `forward_solve_into` — `hymeko_tensor/src/linalg.rs`
 - `from_counts` — `hymeko_tensor/src/renyi.rs`
+- `from_rows` — `hymeko_tensor/src/representations/tensor_csr.rs`
+- `from_symmetric` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `has_fitting` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `hit_rate` — `hymeko_tensor/src/compute/arena/mod.rs`
 - `input_shape` — `hymeko_tensor/src/compute/mod.rs`
@@ -516,6 +657,7 @@ _No public symbols._
 - `is_empty` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `is_host` — `hymeko_tensor/src/compute/mod.rs`
 - `iter` — `hymeko_tensor/src/representations/tensor_coo.rs`
+- `jacobi_eigh` — `hymeko_tensor/src/linalg.rs`
 - `key_for` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `large` — `hymeko_tensor/src/sparse_workload.rs`
 - `largest_intermediate` — `hymeko_tensor/src/contraction.rs`
@@ -523,6 +665,7 @@ _No public symbols._
 - `lease` — `hymeko_tensor/src/compute/arena/host.rs`
 - `len` — `hymeko_tensor/src/representations/tensor_coo.rs`
 - `linear_gram` — `hymeko_tensor/src/renyi.rs`
+- `matmul` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `matvec` — `hymeko_tensor/src/linalg.rs`
 - `matvec_into` — `hymeko_tensor/src/linalg.rs`
 - `matvec_t` — `hymeko_tensor/src/linalg.rs`
@@ -546,6 +689,7 @@ _No public symbols._
 - `next_u64` — `hymeko_tensor/src/sparse_workload.rs`
 - `nnz` — `hymeko_tensor/src/representations/sparse.rs`
 - `nnz` — `hymeko_tensor/src/representations/tensor_csr.rs`
+- `norm` — `hymeko_tensor/src/linalg.rs`
 - `open_session` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `output_axes` — `hymeko_tensor/src/contraction.rs`
 - `output_shape` — `hymeko_tensor/src/compute/mod.rs`
@@ -557,6 +701,7 @@ _No public symbols._
 - `prepare_mapped` — `hymeko_tensor/src/operator/ranges.rs`
 - `print_dense_block` — `hymeko_tensor/src/util.rs`
 - `push` — `hymeko_tensor/src/representations/tensor_coo.rs`
+- `push` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `rank` — `hymeko_tensor/src/representations/sparse.rs`
 - `reclaim_completed` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `reclaim_completed_budgeted` — `hymeko_tensor/src/compute/arena/pool.rs`
@@ -598,6 +743,7 @@ _No public symbols._
 - `to_jax_bcoo` — `hymeko_tensor/src/tensor_convert.rs`
 - `to_nalgebra_csr_slice` — `hymeko_tensor/src/tensor_convert.rs`
 - `to_nalgebra_dense_slice` — `hymeko_tensor/src/tensor_convert.rs`
+- `transpose` — `hymeko_tensor/src/representations/tensor_csr.rs`
 - `trim` — `hymeko_tensor/src/compute/arena/host.rs`
 - `trim` — `hymeko_tensor/src/compute/arena/pool.rs`
 - `try_u32` — `hymeko_tensor/src/compute/mod.rs`

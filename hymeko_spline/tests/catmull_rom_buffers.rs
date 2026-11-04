@@ -32,7 +32,7 @@ fn bits(values: &[f32]) -> Vec<u32> {
 /// call.
 fn dirty_cache() -> CatmullRomCache {
     let (x, coef) = (field(333 * 5, 90), field(5 * 4, 91));
-    catmull_rom_forward(&coef, &x, 333, 5, 4).1
+    catmull_rom_forward(&coef, &x, 333, 5, &hymeko_spline::Knots::uniform(4)).1
 }
 
 /// Shapes on both sides of the parallel threshold.
@@ -50,7 +50,8 @@ fn the_into_forms_are_the_allocating_forms_bit_for_bit() {
         let seed = seed as u64;
         let (x, coef) = (field(n * channels, seed), field(channels * grid, 10 + seed));
         let grad_y = field(n * channels, 20 + seed);
-        let (want_y, want_cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+        let (want_y, want_cache) =
+            catmull_rom_forward(&coef, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
         let want_back = catmull_rom_backward(&coef, &want_cache, &grad_y);
 
         let mut out = vec![f32::NAN; n * channels];
@@ -59,7 +60,14 @@ fn the_into_forms_are_the_allocating_forms_bit_for_bit() {
             out: &mut out,
             cache: &mut cache,
         };
-        catmull_rom_forward_into(&coef, &x, n, channels, grid, into);
+        catmull_rom_forward_into(
+            &coef,
+            &x,
+            n,
+            channels,
+            &hymeko_spline::Knots::uniform(grid),
+            into,
+        );
         assert_eq!(
             bits(&out),
             bits(&want_y),
@@ -132,10 +140,18 @@ fn one_set_of_buffers_serves_three_shapes() {
             out: &mut out,
             cache: &mut cache,
         };
-        catmull_rom_forward_into(&coef, &x, n, channels, grid, into);
+        catmull_rom_forward_into(
+            &coef,
+            &x,
+            n,
+            channels,
+            &hymeko_spline::Knots::uniform(grid),
+            into,
+        );
         let grad_coef = catmull_rom_backward_into(&coef, &cache, &grad_y, &mut grad_x);
 
-        let (want_y, want_cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+        let (want_y, want_cache) =
+            catmull_rom_forward(&coef, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
         let want_back = catmull_rom_backward(&coef, &want_cache, &grad_y);
         assert_eq!(bits(&out), bits(&want_y));
         assert_eq!(bits(&grad_x), bits(&want_back.grad_x));
@@ -153,5 +169,5 @@ fn an_output_of_the_wrong_shape_is_refused() {
         out: &mut out,
         cache: &mut cache,
     };
-    catmull_rom_forward_into(&coef, &x, 10, 2, 4, into);
+    catmull_rom_forward_into(&coef, &x, 10, 2, &hymeko_spline::Knots::uniform(4), into);
 }

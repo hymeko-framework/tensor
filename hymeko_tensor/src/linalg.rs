@@ -22,7 +22,7 @@
 //! | zero RHS | returns the zero vector, `iters = 0`, residual `0.0` — never iterates |
 //! | iteration convention | `iters` counts **completed** iterations, so it is the number of operator applications |
 //! | breakdown | `pᵀAp ≤ 0` (indefinite or numerically dead) stops and returns what it has |
-//! | accumulation | `f32` throughout, in the order written — no `f64` promotion, so a consumer's recorded values move if this changes |
+//! | accumulation | `f32` throughout, in the order written — no `f64` promotion, so a consumer's recorded values move if this changes; the factorisation and the triangular solves also take `f64`, the same loops |
 //! | SPD / ridge | both solvers require SPD; a positive ridge on the diagonal is the caller's job |
 //! | factorisation order | column-major-inner `j ≤ i` loops, the classical Cholesky–Banachiewicz order |
 //! | failure | a non-positive pivot yields [`CholeskyError::NotPositiveDefinite`] with the offending index — never a panic, never a silent `NaN` |
@@ -30,6 +30,8 @@
 //! Small `f64` systems (kinematics, contact) have their own kernels and policies in [`dense`].
 
 pub mod dense;
+
+use crate::common::Real;
 
 /// Why a dense Cholesky factorisation could not proceed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,8 +71,21 @@ pub struct CgOutcome {
     pub converged: bool,
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+// APPROVED-CORE-EDIT: f32-reductions (2026-10-20, user chat: "most certainly" -- nagare_common may
+// depend on hymeko_tensor so the f32 reductions Nagare kept writing inline have one owner).
+// Additive: `dot` was private with this exact body; `norm` is new. No order changes.
+
+/// `⟨a, b⟩` in `f32`, summed in index order (over the shorter length): the inner product every
+/// solver here uses, and the one Nagare's recorded values were computed with.
+#[must_use]
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(&x, &y)| x * y).sum()
+}
+
+/// `‖a‖₂ = √⟨a, a⟩` in `f32`, the squares summed in index order.
+#[must_use]
+pub fn norm(a: &[f32]) -> f32 {
+    dot(a, a).sqrt()
 }
 
 /// `out ← M v` for a dense row-major `n × n` matrix.
@@ -228,41 +243,181 @@ pub fn dense_cholesky_solve(m: &[f32], b: &[f32], n: usize) -> Result<Vec<f32>, 
         return Ok(Vec::new());
     }
     let mut l = vec![0.0f32; n * n];
+    cholesky_lower_into(m, n, &mut l)?;
+    let mut y = vec![0.0f32; n];
+    forward_solve_into(&l, b, n, &mut y);
+    let mut x = vec![0.0f32; n];
+    back_solve_into(&l, &y, n, &mut x);
+    Ok(x)
+}
+
+// APPROVED-CORE-EDIT: f32-reductions (2026-10-20, continued): the factorisation and the two
+// triangular solves `dense_cholesky_solve` always ran, as the allocation-free primitives -- the
+// `matvec_into` precedent. A multifrontal solver (Nagare's junction tree) reuses one factor for many
+// right-hand sides and had them written out a second time. Same loops, same order.
+// APPROVED-CORE-EDIT: f32-reductions (2026-10-20 05:3x, numerics plan Amendment 8): the three generic
+// over `Real`, so an `f64` consumer (the vertex-star smoother of Nagare's SBSH multigrid) factors with
+// the owner instead of a second copy. At `f32` every operation is the one it was.
+
+/// **Cholesky `A = L Lᵀ`** of a row-major SPD `n × n` matrix into `out`'s lower triangle (diagonal
+/// included), in the Cholesky--Banachiewicz order of [`dense_cholesky_solve`]. The strict upper
+/// triangle of `out` is neither written nor read, so `out` may be reused scratch.
+///
+/// # Errors
+/// [`CholeskyError::ShapeMismatch`] unless `a.len() == out.len() == n²`;
+/// [`CholeskyError::NotPositiveDefinite`] with the index of the first non-positive pivot.
+pub fn cholesky_lower_into<F: Real>(a: &[F], n: usize, out: &mut [F]) -> Result<(), CholeskyError> {
+    if a.len() != n * n || out.len() != n * n {
+        return Err(CholeskyError::ShapeMismatch);
+    }
     for i in 0..n {
         for j in 0..=i {
-            let mut s = m[i * n + j];
+            let mut s = a[i * n + j];
             for kk in 0..j {
-                s -= l[i * n + kk] * l[j * n + kk];
+                s -= out[i * n + kk] * out[j * n + kk];
             }
             if i == j {
-                if s <= 0.0 {
+                if s <= F::zero() {
                     return Err(CholeskyError::NotPositiveDefinite { index: i });
                 }
-                l[i * n + j] = s.sqrt();
+                out[i * n + j] = s.sqrt();
             } else {
-                l[i * n + j] = s / l[j * n + j];
+                out[i * n + j] = s / out[j * n + j];
             }
         }
     }
-    // forward substitution: L y = b
-    let mut y = vec![0.0f32; n];
+    Ok(())
+}
+
+/// `L z = b` by forward substitution into `out`, `L` the lower triangle of a row-major `n × n`.
+///
+/// # Panics
+/// Unless `l.len() == n²` and `b.len() == out.len() == n`.
+pub fn forward_solve_into<F: Real>(l: &[F], b: &[F], n: usize, out: &mut [F]) {
+    assert!(
+        l.len() == n * n && b.len() == n && out.len() == n,
+        "forward_solve_into shapes"
+    );
     for i in 0..n {
         let mut s = b[i];
         for j in 0..i {
-            s -= l[i * n + j] * y[j];
+            s -= l[i * n + j] * out[j];
         }
-        y[i] = s / l[i * n + i];
+        out[i] = s / l[i * n + i];
     }
-    // back substitution: Lᵀ x = y
-    let mut x = vec![0.0f32; n];
+}
+
+/// `Lᵀ x = z` by back substitution into `out`, `L` the lower triangle of a row-major `n × n`.
+///
+/// # Panics
+/// Unless `l.len() == n²` and `z.len() == out.len() == n`.
+pub fn back_solve_into<F: Real>(l: &[F], z: &[F], n: usize, out: &mut [F]) {
+    assert!(
+        l.len() == n * n && z.len() == n && out.len() == n,
+        "back_solve_into shapes"
+    );
     for i in (0..n).rev() {
-        let mut s = y[i];
+        let mut s = z[i];
         for j in (i + 1)..n {
-            s -= l[j * n + i] * x[j];
+            s -= l[j * n + i] * out[j];
         }
-        x[i] = s / l[i * n + i];
+        out[i] = s / l[i * n + i];
     }
-    Ok(x)
+}
+
+// APPROVED-CORE-EDIT: f32-reductions (2026-10-20 05:5x, numerics plan Amendment 9): the cyclic Jacobi
+// eigensolver moved here from `nagare_common::ops::spectral_entropy`, generic over `Real`, so Lanczos
+// in `hymeko_numerics` reads its tridiagonal matrix with the owner. At `f32` every operation, threshold
+// and order is the one it was; `nagare_common` re-exports it.
+
+/// **Symmetric eigendecomposition** of a flat row-major `m × m` matrix by cyclic Jacobi rotations:
+/// sweeps of every `(p, q)`, `p < q`, rotating out any entry above `10⁻³⁰` in magnitude, until the
+/// off-diagonal's squared Frobenius norm is at most `10⁻²⁰` or after 100 sweeps.
+///
+/// # Preconditions
+/// `a.len() == m · m` and `a` is symmetric.
+///
+/// # Postconditions
+/// `(values, vectors)`: `values.len() == m`, in no particular order; `vectors` flat `m × m` with
+/// column `j` (`vectors[i · m + j]`) the unit eigenvector of `values[j]`; `A ≈ U diag(λ) Uᵀ`,
+/// `UᵀU = I`. The thresholds are absolute, so a matrix far from unit scale is resolved to them, not
+/// to its own scale.
+///
+/// # Panics
+/// When `a.len() != m · m`.
+pub fn jacobi_eigh<F: Real>(a: &[F], m: usize) -> (Vec<F>, Vec<F>) {
+    assert_eq!(a.len(), m * m);
+    let mut a = a.to_vec();
+    let mut u = vec![F::zero(); m * m];
+    for i in 0..m {
+        u[i * m + i] = F::one();
+    }
+    let (converged, negligible) = (F::from_other(1e-20f64), F::from_other(1e-30f64));
+    for _ in 0..100 {
+        if off_diagonal_squared(&a, m) <= converged {
+            break;
+        }
+        for p in 0..m {
+            for q in (p + 1)..m {
+                if a[p * m + q].abs() > negligible {
+                    jacobi_rotation(&mut a, &mut u, m, p, q);
+                }
+            }
+        }
+    }
+    let values = (0..m).map(|i| a[i * m + i]).collect();
+    (values, u)
+}
+
+/// The off-diagonal squared Frobenius norm of a symmetric `m × m` matrix, its upper triangle summed
+/// row by row.
+fn off_diagonal_squared<F: Real>(a: &[F], m: usize) -> F {
+    let mut off = F::zero();
+    for p in 0..m {
+        for q in (p + 1)..m {
+            off += a[p * m + q] * a[p * m + q];
+        }
+    }
+    off
+}
+
+/// `±1` with `x`'s sign, a zero's sign bit included -- `f32::signum`'s rule, read through
+/// `1 / ±0 = ±∞` -- except that a NaN gives `−1`, not NaN.
+fn signum<F: Real>(x: F) -> F {
+    if x > F::zero() || (x == F::zero() && F::one() / x > F::zero()) {
+        F::one()
+    } else {
+        F::neg_one()
+    }
+}
+
+/// One symmetric Jacobi rotation annihilating `a[p][q]`, accumulated into `u`.
+fn jacobi_rotation<F: Real>(a: &mut [F], u: &mut [F], m: usize, p: usize, q: usize) {
+    let two = F::one() + F::one();
+    let apq = a[p * m + q];
+    let (app, aqq) = (a[p * m + p], a[q * m + q]);
+    let tau = (aqq - app) / (two * apq);
+    let t = signum(tau) / (tau.abs() + (tau * tau + F::one()).sqrt());
+    let c = F::one() / (t * t + F::one()).sqrt();
+    let s = t * c;
+    for i in 0..m {
+        if i != p && i != q {
+            let (aip, aiq) = (a[i * m + p], a[i * m + q]);
+            a[i * m + p] = c * aip - s * aiq;
+            a[p * m + i] = a[i * m + p];
+            a[i * m + q] = s * aip + c * aiq;
+            a[q * m + i] = a[i * m + q];
+        }
+    }
+    a[p * m + p] = app - t * apq;
+    a[q * m + q] = aqq + t * apq;
+    a[p * m + q] = F::zero();
+    a[q * m + p] = F::zero();
+    for i in 0..m {
+        let (uip, uiq) = (u[i * m + p], u[i * m + q]);
+        u[i * m + p] = c * uip - s * uiq;
+        u[i * m + q] = s * uip + c * uiq;
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +429,30 @@ mod tests {
         let m = vec![4.0, 1.0, 0.5, 1.0, 3.0, 0.25, 0.5, 0.25, 2.0];
         let b = vec![1.0, 2.0, 3.0];
         (m, b)
+    }
+
+    /// The allocation-free primitives are the solve's own steps: the same factor bit for bit, the
+    /// same solution through the two substitutions, a stale strict upper triangle ignored, and
+    /// the shape and pivot refusals.
+    #[test]
+    fn the_primitives_are_the_solve_s_steps() {
+        let (m, b) = spd3();
+        let mut l = vec![f32::NAN; 9];
+        cholesky_lower_into(&m, 3, &mut l).unwrap();
+        let (mut y, mut x) = (vec![0.0; 3], vec![0.0; 3]);
+        forward_solve_into(&l, &b, 3, &mut y);
+        back_solve_into(&l, &y, 3, &mut x);
+        assert_eq!(x, dense_cholesky_solve(&m, &b, 3).unwrap());
+        assert!(l[1].is_nan() && l[2].is_nan() && l[5].is_nan());
+        assert_eq!(
+            cholesky_lower_into(&m, 2, &mut l),
+            Err(CholeskyError::ShapeMismatch)
+        );
+        let indefinite = [1.0, 2.0, 2.0, 1.0];
+        assert_eq!(
+            cholesky_lower_into(&indefinite, 2, &mut [0.0; 4]),
+            Err(CholeskyError::NotPositiveDefinite { index: 1 })
+        );
     }
 
     /// The retired test-local matvec, frozen. It is kept as an INDEPENDENT ORACLE for
@@ -348,6 +527,44 @@ mod tests {
     fn a_mismatched_matrix_length_is_refused() {
         let mut out = vec![0.0f32; 3];
         matvec_into(&[1.0, 2.0, 3.0], &[1.0, 1.0, 1.0], 3, &mut out);
+    }
+
+    /// At `f64` the primitives run the same loops: on `A = L Lᵀ` with small integer `L` (perfect-square
+    /// pivots, exact quotients) both scalars recover `L` and the solution exactly, value for value.
+    #[test]
+    fn the_f64_factor_and_solves_are_the_f32_ones_on_exact_data() {
+        let l = [1.0f32, 0.0, 0.0, 2.0, 2.0, 0.0, -1.0, 3.0, 4.0];
+        let n = 3;
+        let mut a = [0.0f32; 9];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = (0..n).map(|k| l[i * n + k] * l[j * n + k]).sum();
+            }
+        }
+        let a64: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+        let (mut l32, mut l64) = ([0.0f32; 9], [0.0f64; 9]);
+        cholesky_lower_into(&a, n, &mut l32).expect("SPD");
+        cholesky_lower_into(&a64, n, &mut l64).expect("SPD");
+        for i in 0..n {
+            for j in 0..=i {
+                assert_eq!(l32[i * n + j], l[i * n + j]);
+                assert_eq!(l64[i * n + j], f64::from(l[i * n + j]));
+            }
+        }
+        // b = A x for x = (1, -2, 3): the solves return x exactly at both scalars.
+        let x = [1.0f32, -2.0, 3.0];
+        let b: Vec<f32> = (0..n)
+            .map(|i| (0..n).map(|j| a[i * n + j] * x[j]).sum())
+            .collect();
+        let b64: Vec<f64> = b.iter().map(|&v| f64::from(v)).collect();
+        let (mut z32, mut x32) = ([0.0f32; 3], [0.0f32; 3]);
+        forward_solve_into(&l32, &b, n, &mut z32);
+        back_solve_into(&l32, &z32, n, &mut x32);
+        let (mut z64, mut x64) = ([0.0f64; 3], [0.0f64; 3]);
+        forward_solve_into(&l64, &b64, n, &mut z64);
+        back_solve_into(&l64, &z64, n, &mut x64);
+        assert_eq!(x32, x);
+        assert_eq!(x64, x.map(f64::from));
     }
 
     #[test]

@@ -12,6 +12,13 @@
 //! public surface is a trait over `&[f64]` and three functions — which is what makes it general
 //! mathematics rather than an application detail that happens to be shared.
 //!
+//! Since 2026-10-19 (the second grant, plan 2026-10-19-numerics-optimizers) it also owns the
+//! **symmetric** side: preconditioned CG ([`pcg()`]) and the general nonlinear least-squares loops,
+//! Gauss--Newton over a [`LeastSquares`] problem ([`gauss_newton`]) and IRLS with robust kernels
+//! ([`irls`]) — moved out of `nagare_slam`'s pose graph and `nagare_autoholonomy`, where each was
+//! written for one problem. The pose graph, the defect field and any other least-squares problem are
+//! implementations of the trait, not owners of a loop.
+//!
 //! # Why this is not `hymeko_tensor::linalg`
 //!
 //! A §6.1 discovery pass over the workspace found one near-owner and rejected it on contract, not
@@ -62,12 +69,37 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admm;
 pub mod diffusion;
+pub mod fas;
 mod krylov;
-pub use krylov::{GmresConfig, GmresTolerance, GmresWorkspace};
+pub mod lanczos;
+pub mod lbfgs;
+pub mod least_squares;
+pub mod pcg;
 pub mod port_hamiltonian;
+pub mod robust;
+pub mod trust_region;
 
+pub use admm::{admm, Admm, AdmmReport, ProximalBlock};
+pub use fas::{fas, Fas, FasHierarchy, FasLevel, FasReport};
+pub use krylov::{GmresConfig, GmresTolerance, GmresWorkspace};
+pub use lanczos::{lanczos, tridiagonal_eigh, Lanczos, Ritz};
+pub use lbfgs::{lbfgs, Lbfgs, LbfgsReport, Objective};
+pub use least_squares::{
+    gauss_newton, levenberg_marquardt, GaussNewton, GaussNewtonReport, IncrementSolver,
+    LeastSquares, LevenbergMarquardt, LmReport, NormalSystem, PcgIncrement,
+};
+pub use pcg::{pcg, Additive, Identity, Jacobi, PcgProgress, Preconditioner};
 pub use port_hamiltonian::{Interconnection, NormalisedFlow, Port, PortHamiltonian};
+pub use robust::{
+    irls, Arithmetic, Cauchy, FixedScale, GaussNewtonRuns, Graduated, Huber, MedianWithFloor,
+    Reweight, RobustKernel, ScaleSchedule, WeightedSolve,
+};
+pub use trust_region::{
+    steihaug, trust_region, GaussNewtonModel, SteihaugStep, StepEnding, TrustRegion,
+    TrustRegionModel, TrustRegionReport,
+};
 
 /// A linear operator applied to a vector. Matrix-free: a discrete curl is a stencil, and writing it
 /// out as a matrix would spend memory on structure that is already known.
