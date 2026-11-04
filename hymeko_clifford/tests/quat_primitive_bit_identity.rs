@@ -168,3 +168,27 @@ fn the_finiteness_assertion_is_a_contract_tightening_not_an_arithmetic_differenc
         assert!(reference_qmul(bad, IDENT).iter().any(|v| !v.is_finite()));
     }
 }
+
+/// The one cross product, at both precisions: `e_x × e_y = e_z`, anticommutative, orthogonal to
+/// its factors, and the textbook expression bit for bit.
+#[test]
+fn cross_is_the_textbook_product_at_both_precisions() {
+    assert_eq!(
+        hymeko_clifford::cross([1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        [0.0, 0.0, 1.0]
+    );
+    let (a, b) = ([0.3f64, -1.7, 2.2], [1.1f64, 0.4, -0.9]);
+    let c = hymeko_clifford::cross(a, b);
+    assert_eq!(
+        c,
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]
+        ]
+    );
+    let d = hymeko_clifford::cross(b, a);
+    assert!(c.iter().zip(&d).all(|(x, y)| *x == -*y));
+    let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    assert!(dot(c, a).abs() < 1e-12 && dot(c, b).abs() < 1e-12);
+}

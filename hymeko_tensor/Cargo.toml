@@ -3,7 +3,7 @@ name = "hymeko_tensor"
 version = "0.1.0"
 edition = "2021"
 description = "Tensor storage, numerical kernels, scalar contracts and matrix-based information estimators"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [lib]
 name = "hymeko_tensor"
@@ -31,6 +31,10 @@ required-features = ["sparse"]
 
 [[test]]
 name = "sparse_workload_kat"
+required-features = ["sparse"]
+
+[[test]]
+name = "csr_construction"
 required-features = ["sparse"]
 
 [[bench]]

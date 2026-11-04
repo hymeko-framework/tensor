@@ -39,16 +39,29 @@
 
 /// Catmull-Rom and Chebyshev-CR kernels on flat row-major `f32` slices.
 pub mod catmull_rom;
+/// The closed form of the uniform Chebyshev--CR spline of at most three terms, under chord or bounded tangents.
+pub mod closed_form;
+/// The knots a Catmull–Rom spline interpolates: a uniform base grid, each segment refined on a dyadic orthtree.
+pub mod knots;
 /// Kochanek-Bartels (TCB) spline kernels.
 pub mod kochanek_bartels;
+/// Cubic Hermite interpolation of sampled f64 curves: values and derivatives at two knots.
+pub mod hermite;
 /// Rational B-spline curves and parameter derivatives in f64 homogeneous coordinates.
 pub mod nurbs;
 
 pub use catmull_rom::{
-    catmull_rom_backward, catmull_rom_backward_into, catmull_rom_forward, catmull_rom_forward_into,
-    chebyshev_control_points, chebyshev_cr_backward, chebyshev_cr_backward_into,
-    chebyshev_cr_forward, chebyshev_cr_forward_into, chebyshev_deploy_backward,
-    chebyshev_deploy_forward, chebyshev_knot_basis, CatmullRomBackward, CatmullRomBuffers,
-    CatmullRomCache, ChebyshevCrBackward, PAR_MIN_ELEMS,
+    catmull_rom_backward, catmull_rom_backward_into, catmull_rom_banks_backward_into,
+    catmull_rom_banks_forward_into, catmull_rom_forward, catmull_rom_forward_into,
+    catmull_rom_leaf_coefficients, catmull_rom_routed_backward_into,
+    catmull_rom_routed_forward_into, chebyshev_control_points, chebyshev_cr_backward,
+    chebyshev_cr_backward_into, chebyshev_cr_banks_backward_into, chebyshev_cr_banks_forward_into,
+    chebyshev_cr_forward, chebyshev_cr_forward_into, chebyshev_cr_routed_backward_into,
+    chebyshev_cr_routed_forward_into, chebyshev_deploy_backward, chebyshev_deploy_forward,
+    chebyshev_knot_basis, CatmullRomBackward, CatmullRomBanksBuffers, CatmullRomBuffers,
+    CatmullRomCache, ChebyshevCrBackward, ChebyshevGrid, Moments, PreparedSpline, RoutedBuffers,
+    RoutedCotangents, TableSource, PAR_MIN_ELEMS, SKIP,
 };
+pub use closed_form::{BoundedClosedForm, ChebyshevClosedForm, ClosedForm, KnotDefect, TermPlanes};
+pub use knots::{Knots, Tangents};
 pub use kochanek_bartels::{kb_backward, kb_forward, KbBackward, KbCache};

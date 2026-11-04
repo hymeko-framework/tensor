@@ -1,0 +1,180 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}\usepackage[T1]{fontenc}\usepackage{lmodern}
+\usepackage[margin=21mm]{geometry}\usepackage{amsmath,amssymb,booktabs,tabularx,xcolor}
+\usepackage[hidelinks]{hyperref}\usepackage{xurl}
+\setlength{\emergencystretch}{3em}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\title{GMRES hipergráf-operátorokon\\Matematikai összefoglaló és fejlesztési irányok}
+\author{HyMeKo -- műszaki munkajegyzet}\date{2026. október 25.}
+\begin{document}\maketitle
+\noindent\textbf{Cél.} A kanonikus IR-en végzett mátrixmentes megoldás matematikai
+alapjainak összefoglalása, a szükséges és az elhagyható munka megkülönböztetése.
+A leírás előbb készült el, mint az alább tervezett munkaterület-javítás. A mért
+eredmények a korábbi, tartományos operátorbekötésre vonatkoznak; az új
+allokációs változtatásokhoz még nincs sebességmérés.
+
+\section*{Tématérkép}
+\begin{tabularx}{\linewidth}{@{}lX@{}}\toprule
+Téma & A megválaszolandó kérdés\\\midrule
+Incidenciaalgebra & Hogyan alkalmazható az operátor gráf- vagy mátrixmaterializálás nélkül?\\
+Krylov-altér és Arnoldi & Milyen közelítést épít a GMRES, és miért kell ortogonalizálni?\\
+Kis legkisebbnégyzet-feladat & Mire szolgál a Hessenberg-tábla és a Givens-forgatás?\\
+Hibakorlátok & Hogyan kapcsolódik az $L_2$ maradék az előírt PageRank $L_1$ hibához?\\
+Memória és számítás & Mi a bázis ára, és mi szüntethető meg a képlet megváltoztatása nélkül?\\
+Előfeltételezés, újrahasznosítás & Milyen későbbi változtatások csökkenthetik az iterációszámot?\\
+Más alkalmazások & Mely fizikai feladatok használhatják ugyanezt a megoldót?\\\bottomrule
+\end{tabularx}
+
+\section{Az IR-ből alkalmazott hipergráf-operátor}
+Legyen $B\in\mathbb R^{E\times V}$ az incidenciaoperátor: a sorok hiperélek,
+az oszlopok csúcsok. Egységsúlyú esetben $B_{ev}$ a tagság multiplicitása.
+Legyen $D_v=\operatorname{diag}(B^T\mathbf1)$ és
+$D_e=\operatorname{diag}(B\mathbf1)$. A nem izolált rész csúcs--hiperél--csúcs
+sétája oszlopvektorokra:
+\[
+ T_0x=B^T D_e^{\dagger}B D_v^{\dagger}x.
+\]
+A $\dagger$ itt diagonális inverzt jelent a pozitív helyeken, nullát a nullákon.
+Normalizált $p\geq0$, $\mathbf1^Tp=1$ és az izolált oszlopokat jelölő $d$
+mellett $T=T_0+p d^T$ oszlopsztochasztikus. A művelet: foknormalizálás,
+hiperélenkénti összegyűjtés, méretnormalizálás, visszaosztás és az izolált tömeg
+hozzáadása. $B$, $B^TB$, klikk- és Levi-gráf létrehozása nem szükséges.
+Az IR közös feloldott incidenciaindexe ettől még tárolást igényel.
+
+Irányított vagy súlyozott esetben külön $B_s,B_t$ írja le a forrás- és céloldalt:
+$T_0=B_t^TD_t^{\dagger}B_sD_s^{\dagger}$, ahol a cél nélküli hiperélek
+forrástömege ki van zárva a normalizálásból. A képlet a \emph{választott lineáris}
+sétamodellre vonatkozik, nem minden lehetséges nemlineáris hipergráf-dinamikára.
+Az irányítatlan incidencia-séta kapcsolata a klasszikus hipergráf-Laplacianussal:
+\href{https://papers.nips.cc/paper/2006/file/dff8e9c2ac33381546d96deea9922999-Paper.pdf}{Zhou, Huang és Schölkopf (2006), 4. szakasz}.
+
+\newpage\section{GMRES: Arnoldi és a kis maradékminimum}
+PageRanknál $0\leq\alpha<1$:
+\[
+ x=\alpha Tx+(1-\alpha)p,\qquad A x=b,\quad
+ A=I-\alpha T,\quad b=(1-\alpha)p.
+\]
+A közös numerikus motor általános alakja $A=I-\theta S$; csak az $Sv$ művelet
+kell. $r_0=b-Ax_0$, $\beta=\norm{r_0}_2$ és $v_1=r_0/\beta$ esetén:
+\[
+ \mathcal K_m(A,r_0)=\operatorname{span}\{r_0,Ar_0,\ldots,A^{m-1}r_0\}.
+\]
+Az Arnoldi-eljárás ortonormált $V_m=[v_1,\ldots,v_m]$ bázist és kis felső
+Hessenberg-táblát állít elő, egzakt aritmetikában
+\[
+ AV_m=V_{m+1}\bar H_m,\qquad
+ y_m=\arg\min_y\norm{\beta e_1-\bar H_m y}_2,\qquad x_m=x_0+V_m y_m.
+\]
+A Givens-forgatások a kis legkisebbnégyzet-feladatot fokozatosan háromszög-alakra
+hozzák. A GMRES a \emph{felépített altérben} minimalizál; ez nem globális
+minimumkeresés az összes lehetséges vektor között.
+
+\paragraph{A kétféle projekció.} A gráf kiterjesztését elkerüljük. A Krylov-altérbe
+vetítés a GMRES módszerének része. A hosszú $V_m$ bázis költséges; a kis
+$\bar H_m$ együtthatótábla nem nagy gráfmátrix. $V=65\,536$, $m=20$ mellett
+húsz \texttt{f64} bázisvektor $10$ MiB; a $(m+1)m=420$ Hessenberg-együttható
+mindössze $3360$ bájt. Ehhez munkavektorok és tárolómetaadatok járulnak.
+
+\paragraph{Költségmodell.} $I$ incidenciával egy rendezett operátoralkalmazás
+$O(V+E+I)$. Megfelelő összefüggő tartományok esetén a közös prefix-/differencia-
+operátor $O(V+E+R)$ munkát végez, ahol $R$ a tartományok száma.
+Egy $m$ lépéses GMRES-ciklus költsége megközelítőleg
+\[
+ O(m C_T+Vm^2+m^2),\qquad \text{memória: }O(Vm+m^2).
+\]
+A módosított Gram--Schmidt lépésenként az előző irányokkal skalárszoroz és
+korrekciót von le. Ezek függő műveletek; egyetlen párhuzamos skalárszorzás-csomagra
+cserélésük már más ortogonalizálási eljárás lehet, külön stabilitásvizsgálattal.
+
+\paragraph{Restart.} A GMRES($m$) korlátozza a bázisméretet, majd új maradékkal
+indul. A nagyobb $m$ csökkentheti az újraindítás veszteségét, de növeli a tárolást
+és az ortogonalizálást. Az általános, újraindított GMRES-re nincs minden
+nemszimmetrikus rendszerre egységes gyors konvergenciagarancia. A speciális
+disszipatív fizikai operátorok tulajdonságai nem vihetők át automatikusan PageRankra.
+
+\newpage\section{Maradék, tényleges hiba és numerikus ellenőrzés}
+Oszlopsztochasztikus $T$ esetén $\norm{T}_1=1$, ezért a Neumann-sor alapján
+\[
+ A^{-1}=\sum_{j=0}^{\infty}\alpha^j T^j,\qquad
+ \norm{A^{-1}}_1\leq\frac1{1-\alpha},\qquad
+ \norm{x-x_*}_1\leq\frac{\norm{b-Ax}_1}{1-\alpha}.
+\]
+Az $L_2$ maradék elegendő feltétele egy $\varepsilon$ globális $L_1$ célhoz:
+\[
+ \norm{r}_1\leq\sqrt V\norm{r}_2,\qquad
+ \norm{r}_2\leq\frac{(1-\alpha)\varepsilon}{\sqrt V}.
+\]
+Ez elégséges, nem szükséges feltétel. A jelenlegi adapter ezen felül $1/4$-es
+biztonsági tényezőt használ. Az abszolút küszöb közvetlen átadása lehetővé teszi,
+hogy a jobb oldal normáját a közös motor csak egyszer számítsa ki.
+
+Az elfogadott eredményt külön, rendezett kanonikus frissítés ellenőrzi. Ha
+$y=F(x)=\alpha Tx+(1-\alpha)p$, akkor
+\[
+ \norm{y-x_*}_1\leq\frac{\alpha}{1-\alpha}\norm{y-x}_1.
+\]
+Ez a visszaadott $y$ vektorra vonatkozó korlát. A belső Hessenberg-maradék becslése
+önmagában nem helyettesíti a valódi operátorral végzett ellenőrzést.
+A fenti azonosságok egzakt aritmetikában érvényesek; a lebegőpontos megvalósítást
+független orákulumokkal és kerekítési tartalékkal ellenőrizzük, nem intervallumos
+bizonyításként állítjuk be.
+
+\section{Most javítandó tárolási és bejárási többletek}
+\begin{tabularx}{\linewidth}{@{}lX@{}}\toprule
+Módosítás & Megőrzendő matematikai tulajdonság\\\midrule
+Újrahasználható munkaterület & Egy motor, változatlan Arnoldi-/Givens-sorrend; a ciklusok nem örökölhetnek régi értékeket.\\
+Helyben képzett munkavektor & Ugyanaz a $v_k-\theta Sv_k$ és ugyanaz a normalizálás, fölösleges köztes \texttt{Vec} nélkül.\\
+Utolsó fölösleges irány elhagyása & A normája és a Givens-lépés szükséges; maga a következő bázisvektor nem kell, ha ciklus vagy iterációkeret véget ér.\\
+Egyszer számított jobboldal-norma & A relatív/abszolút tolerancia jelentése explicit; a \texttt{Report} tényleges relatív maradékot adjon.\\
+Összevont maradék/normabejárás & A maradék elemei és az összeadás sorrendje megmaradnak; nincs feltétel nélküli redukció-átrendezés.\\\bottomrule
+\end{tabularx}
+
+A munkaterület újrahasználata megszüntetheti az ismételt allokációt, de nem
+csökkenti automatikusan az $O(Vm)$ szükséges bázistárolást. Előfoglalás és
+vektorműveletek kapcsolatáról:
+\href{https://petsc.org/release/manualpages/KSP/KSPGMRESSetPreAllocateVectors/}{PETSc: GMRES work-vector preallocation}.
+
+\newpage\section{Későbbi algoritmikus irányok}
+\begin{itemize}
+\item \textbf{Előfeltételezés:} $AM^{-1}z=b$, $x=M^{-1}z$. Cél a megoldás
+megőrzése mellett kedvezőbb konvergencia. $M^{-1}$ alkalmazási és előkészítési
+költségét is számolni kell; a komponensek, hubok és az izolált rész szerkezete
+jelölteket adhat. A teleportáció globális kapcsolatát meg kell őrizni.
+\item \textbf{Krylov-információ újrahasznosítása:} ismételt vagy lassan változó
+rendszereknél előző megoldás, kiválasztott altér vagy defláció. Ez külön stratégia,
+nem azonos a puszta pufferek újrahasználatával. IR-változásnál érvényességvizsgálat kell.
+\item \textbf{Megállási feltétel:} a valódi $L_1$ cél korábbi ellenőrzése lehet
+hasznos, de az ellenőrzés új operátoralkalmazást igényelhet. A kisebb végső maradék
+önmagában nem bizonyítja, hogy egy korábbi lépés már elegendő lett volna.
+\item \textbf{Más Krylov-módszer:} szimmetrikus pozitív definit rendszernél CG
+jelölt. Az irányítatlan séta aktív részén a fok szerinti hasonlósági transzformáció
+szimmetrikus alakot adhat; az izolált rész és a normalizálás kezelése külön feladat.
+Irányítottság esetén ezt nem szabad feltételezni.
+\end{itemize}
+Ezek kutatási/fejlesztési irányok, nem a mostani javítás részei.
+Általános megoldó- és előfeltételező-keret:
+\href{https://petsc.org/release/manual/ksp/}{PETSc KSP kézikönyv}.
+
+\section{Alkalmazások és az eddigi bizonyíték}
+Az implicit diffúzió tipikus alakja $(I+\Delta t L)x_{k+1}=b$.
+Kvadratikus port-Hamiltoni rendszernél az energia-normalizált operátor
+$S=Q^{1/2}(J-R)Q^{1/2}$, $J^T=-J$, $R\succeq0$; a középpontos lépés
+$(I-hS/2)z_{k+1}=b$. A közös numerikus GMRES mindkét meglévő HyMeKo-modellben
+használt. A gráfbejárás, pontos legrövidebb Berge-út és Christofides kombinatorikus
+részei más feladatosztályok; ezekre ez nem közvetlen algoritmuscsere.
+
+A Ryzen 7 3700X gépen végzett korábbi, ötismétléses kontrollban a tartományos operátor bekötése
+négy hubos/régiós elrendezésen $1{,}33$--$1{,}81$-szeres GMRES-gyorsulást adott,
+változatlan 22/25 lépésszámmal. A GMRES főfüggvénye és a skalárszorzat a két
+új profil önmintáinak $35{,}38\%$, illetve $41{,}54\%$-át kapta. A profil a teljes
+mérőfolyamatot tartalmazza: ezek nem tisztán megoldási időarányok, és nem
+ugyanekkora eltüntethető időt jelentenek. A nyers bizonyíték:
+\path{graph/reports/2026-10-25-pagerank-multihost/structural-control/}.
+
+\paragraph{A mostani javítás elfogadási feltétele.} Független sűrű megoldással
+egyező eredmény; változatlan maradék-/iterációs jelentés a relatív toleranciás
+hívásoknál; újrahasznált munkaterületnél méretváltás, restart, nulla keret,
+kezdetben pontos megoldás és sikertelen konvergencia kezelése. Külön determinisztikus
+ellenőrzés vizsgálja az allokációmentes meleg újrafuttatást. Új sebességállítás
+csak későbbi, külön engedélyezett mérésből következhet.
+\end{document}

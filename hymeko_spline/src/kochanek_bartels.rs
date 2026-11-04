@@ -287,7 +287,8 @@ mod tests {
         let tcb = vec![0.0f32; channels * grid * 3];
         let x = vec![-0.7, -0.2, 0.15, 0.4, 0.72, -0.55, 0.9, -0.9];
         let (kb, _) = kb_forward(&coef, &tcb, &x, n, channels, grid);
-        let (cr, _) = catmull_rom_forward(&coef, &x, n, channels, grid);
+        let (cr, _) =
+            catmull_rom_forward(&coef, &x, n, channels, &crate::knots::Knots::uniform(grid));
         assert!(kb.iter().zip(&cr).all(|(a, b)| (a - b).abs() < 1e-6));
     }
 

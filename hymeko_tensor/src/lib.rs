@@ -1,7 +1,8 @@
 //! Tensor storage, numerical contracts and kernels, independent of canonical IR.
 //!
 //! The default build is dependency-free: scalar algebra, degree computation,
-//! weight initialization, dense solvers ([`linalg`]), information estimators
+//! weight initialization, dense solvers ([`linalg`]), forward-mode duals ([`dual`]),
+//! box-bounded constrained minimisation ([`optimize`]), information estimators
 //! ([`renyi`]), and parameter layout ([`stream`]).
 //!
 //! Optional features:
@@ -13,7 +14,9 @@
 //! and neural-network layers. Neither is a dependency of this crate.
 
 pub mod contraction;
+pub mod dual;
 pub mod linalg;
+pub mod optimize;
 pub mod operator;
 pub mod renyi;
 pub mod stream;
