@@ -1,0 +1,44 @@
+[package]
+name = "hymeko-spline-dev"
+version = "0.1.0"
+edition = "2021"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+description = "Original hymeko_spline correctness clients through their owning shared library"
+
+[dependencies]
+hymeko_spline = { package = "hymeko-spline-dylib", path = "../dylib/spline" }
+
+[features]
+default = []
+parallel = ["hymeko_spline/parallel"]
+
+[[test]]
+name = "build_contract"
+path = "../../hymeko_spline/tests/build_contract.rs"
+
+[[test]]
+name = "catmull_rom_buffers"
+path = "../../hymeko_spline/tests/catmull_rom_buffers.rs"
+
+[[test]]
+name = "clamp_gradient_contract"
+path = "../../hymeko_spline/tests/clamp_gradient_contract.rs"
+
+[[test]]
+name = "coginfocom_grid3_parity"
+path = "../../hymeko_spline/tests/coginfocom_grid3_parity.rs"
+
+[[test]]
+name = "nurbs"
+path = "../../hymeko_spline/tests/nurbs.rs"
+
+[[test]]
+name = "scenario_feature_parity"
+path = "../../hymeko_spline/tests/scenario_feature_parity.rs"
+
+[[test]]
+name = "scenario_gradients"
+path = "../../hymeko_spline/tests/scenario_gradients.rs"

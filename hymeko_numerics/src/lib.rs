@@ -1,4 +1,8 @@
-//! Matrix-free iterative solvers for **shifted skew-symmetric** systems.
+//! Matrix-free iterative solvers for shifted systems, including dissipative physics.
+//!
+//! The structural bounds below describe the physical operators `S = K - D`.
+//! GMRES also accepts other linear operators, including stochastic transitions;
+//! those operators require their own convergence and residual-error arguments.
 //!
 //! ```text
 //! A x = b,    A = I - θ S,    S = K - D    with  K skew, D positive semidefinite
@@ -7,6 +11,13 @@
 //! Nothing here knows what a port-Hamiltonian system is, what a mesh is, or what HyMeKo is. The
 //! public surface is a trait over `&[f64]` and three functions — which is what makes it general
 //! mathematics rather than an application detail that happens to be shared.
+//!
+//! Since 2026-10-19 (the second grant, plan 2026-10-19-numerics-optimizers) it also owns the
+//! **symmetric** side: preconditioned CG ([`pcg()`]) and the general nonlinear least-squares loops,
+//! Gauss--Newton over a [`LeastSquares`] problem ([`gauss_newton`]) and IRLS with robust kernels
+//! ([`irls`]) — moved out of `nagare_slam`'s pose graph and `nagare_autoholonomy`, where each was
+//! written for one problem. The pose graph, the defect field and any other least-squares problem are
+//! implementations of the trait, not owners of a loop.
 //!
 //! # Why this is not `hymeko_tensor::linalg`
 //!
@@ -58,10 +69,37 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admm;
 pub mod diffusion;
+pub mod fas;
+mod krylov;
+pub mod lanczos;
+pub mod lbfgs;
+pub mod least_squares;
+pub mod pcg;
 pub mod port_hamiltonian;
+pub mod robust;
+pub mod trust_region;
 
+pub use admm::{admm, Admm, AdmmReport, ProximalBlock};
+pub use fas::{fas, Fas, FasHierarchy, FasLevel, FasReport};
+pub use krylov::{GmresConfig, GmresTolerance, GmresWorkspace};
+pub use lanczos::{lanczos, tridiagonal_eigh, Lanczos, Ritz};
+pub use lbfgs::{lbfgs, Lbfgs, LbfgsReport, Objective};
+pub use least_squares::{
+    gauss_newton, levenberg_marquardt, GaussNewton, GaussNewtonReport, IncrementSolver,
+    LeastSquares, LevenbergMarquardt, LmReport, NormalSystem, PcgIncrement,
+};
+pub use pcg::{pcg, Additive, Identity, Jacobi, PcgProgress, Preconditioner};
 pub use port_hamiltonian::{Interconnection, NormalisedFlow, Port, PortHamiltonian};
+pub use robust::{
+    irls, Arithmetic, Cauchy, FixedScale, GaussNewtonRuns, Graduated, Huber, MedianWithFloor,
+    Reweight, RobustKernel, ScaleSchedule, WeightedSolve,
+};
+pub use trust_region::{
+    steihaug, trust_region, GaussNewtonModel, SteihaugStep, StepEnding, TrustRegion,
+    TrustRegionModel, TrustRegionReport,
+};
 
 /// A linear operator applied to a vector. Matrix-free: a discrete curl is a stencil, and writing it
 /// out as a matrix would spend memory on structure that is already known.
@@ -96,9 +134,9 @@ pub struct Report {
 /// solvers here call it per iteration on slices they allocated themselves.
 ///
 /// # Postconditions
-/// Left-to-right summation in slice order, `f64` throughout. Not Kahan-compensated: the vectors
-/// these solvers carry are `dim()`-sized residuals, well under the ~10⁴ terms at which §5 requires
-/// compensation, and changing the summation order would move every recorded residual.
+/// Left-to-right summation in slice order, `f64` throughout, without compensation.
+/// Changing that order can move recorded residuals. Applications requiring an
+/// additional error certificate must check it independently of this reduction.
 pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
@@ -161,13 +199,13 @@ pub fn richardson<O: Operator>(
     unreachable!()
 }
 
-/// Solve `(I - θ S) x = b` by GMRES with Arnoldi and Givens rotations, restarted every `restart`.
+/// Solve `(I - theta S)x = b` using restarted, matrix-free GMRES.
 ///
-/// For this operator the convergence is not a hope. The symmetric part of `A` is at least the
-/// identity, so `A` is positive real with `λ_min(H) ≥ 1`, and Elman's bound gives a per-iteration
-/// reduction of `√(1 - λ_min(H)² / ‖A‖²)` — a rate set by `θ‖S‖` and by nothing about the mesh.
-///
-/// Used where the Neumann series cannot be: a step deliberately longer than the fastest mode.
+/// This allocating facade delegates to [`GmresWorkspace`]. Keep a workspace to
+/// reuse storage across solves. The relative residual criterion, arithmetic
+/// order and restart behavior are shared by both entry points. Convergence rates
+/// depend on the operator; the positive-real argument in the crate overview
+/// applies specifically to its dissipative physical systems.
 pub fn gmres<O: Operator>(
     s: &O,
     theta: f64,
@@ -177,94 +215,17 @@ pub fn gmres<O: Operator>(
     restart: usize,
     max_iterations: usize,
 ) -> Report {
-    let n = s.dim();
-    let m = restart.clamp(1, max_iterations.max(1));
-    let scale = norm(b).max(f64::MIN_POSITIVE);
-    let (mut r, mut work) = (vec![0.0; n], vec![0.0; n]);
-    let mut total = 0usize;
-
-    loop {
-        residual(s, theta, b, x, &mut r, &mut work);
-        let beta = norm(&r);
-        let relative = beta / scale;
-        if relative <= tol || total >= max_iterations {
-            return Report {
-                iterations: total,
-                residual: relative,
-                converged: relative <= tol,
-            };
-        }
-
-        // Arnoldi basis, Hessenberg factor kept in its rotated (upper triangular) form
-        let mut v: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
-        v.push(r.iter().map(|t| t / beta).collect());
-        let mut h = vec![vec![0.0f64; m]; m + 1];
-        let (mut cs, mut sn) = (vec![0.0f64; m], vec![0.0f64; m]);
-        let mut g = vec![0.0f64; m + 1];
-        g[0] = beta;
-        let mut used = 0usize;
-
-        for k in 0..m {
-            if total + k >= max_iterations {
-                break;
-            }
-            // w = A v_k = v_k - θ S v_k
-            s.apply(&v[k], &mut work);
-            let mut w: Vec<f64> = (0..n).map(|i| v[k][i] - theta * work[i]).collect();
-            for j in 0..=k {
-                h[j][k] = dot(&w, &v[j]);
-                for i in 0..n {
-                    w[i] -= h[j][k] * v[j][i];
-                }
-            }
-            let arnoldi_norm = norm(&w);
-            h[k + 1][k] = arnoldi_norm;
-
-            // apply the rotations accumulated so far, then annihilate the new subdiagonal
-            for j in 0..k {
-                let (c, sj) = (cs[j], sn[j]);
-                let t = c * h[j][k] + sj * h[j + 1][k];
-                h[j + 1][k] = -sj * h[j][k] + c * h[j + 1][k];
-                h[j][k] = t;
-            }
-            let denominator = (h[k][k] * h[k][k] + h[k + 1][k] * h[k + 1][k]).sqrt();
-            if denominator < 1e-300 {
-                used = k;
-                break;
-            }
-            cs[k] = h[k][k] / denominator;
-            sn[k] = h[k + 1][k] / denominator;
-            h[k][k] = denominator;
-            h[k + 1][k] = 0.0;
-            g[k + 1] = -sn[k] * g[k];
-            g[k] *= cs[k];
-            used = k + 1;
-
-            let breakdown = arnoldi_norm < 1e-300;
-            if breakdown || g[k + 1].abs() / scale <= tol {
-                break;
-            }
-            v.push(w.iter().map(|t| t / arnoldi_norm).collect());
-        }
-
-        // back-substitute for the correction and add it
-        if used > 0 {
-            let mut y = vec![0.0f64; used];
-            for i in (0..used).rev() {
-                let mut acc = g[i];
-                for j in (i + 1)..used {
-                    acc -= h[i][j] * y[j];
-                }
-                y[i] = acc / h[i][i];
-            }
-            for (k, yk) in y.iter().enumerate() {
-                for i in 0..n {
-                    x[i] += yk * v[k][i];
-                }
-            }
-        }
-        total += used.max(1);
-    }
+    GmresWorkspace::new().solve(
+        s,
+        theta,
+        b,
+        x,
+        GmresConfig {
+            tolerance: GmresTolerance::Relative(tol),
+            restart,
+            max_iterations,
+        },
+    )
 }
 
 /// Solve `(I - θ S) x = b` by conjugate gradients on the normal equations.

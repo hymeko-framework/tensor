@@ -1,66 +1,65 @@
-# tensor - HyMeKo numerical foundations
+# tensor
 
-Tensor owns numerical storage, kernels and arithmetic contracts shared by the
-HyMeKo framework. Core owns the canonical semantic IR; Graph owns graph algorithms.
-This workspace contains no second graph implementation or semantic IR.
+Numerical storage, kernels and solvers for the HyMeKo framework, as one Cargo
+workspace. The canonical semantic IR lives in
+[core](https://github.com/hymeko-framework/core) and the hypergraph algorithms
+in [graph](https://github.com/hymeko-framework/graph); this workspace depends
+on neither.
 
 ## Crates
 
-| Crate | Responsibility |
+| Crate | Contents |
 |---|---|
-| `hymeko_tensor` | Tensor/CSR storage, numerical kernels, host compute arenas, information estimators, virtual row operators and contraction planning |
-| `hymeko_clifford` | Clifford algebra, rotors and rigid-motion primitives |
-| `hymeko_spline` | Spline kernels, including Catmull-Rom and NURBS |
-| `hymeko_numerics` | Matrix-free iterative solvers and port-Hamiltonian numerical contracts |
-| `hymeko_vision` | Vision primitives |
-| `hymeko_numeric_vv` | Downstream numerical verification with independent/frozen oracles |
-| `hymeko_tensor_py` | Optional Python bindings to Tensor-owned functionality |
+| `hymeko_tensor` | Scalar algebra, dense solvers (`linalg`), forward-mode duals (`dual`), box-bounded minimisation (`optimize`), matrix-based Rényi-2 estimators (`renyi`), parameter layout (`stream`), virtual sparse-row operators (`operator`), bounded contraction planning (`contraction`) and host compute arenas (`compute`) |
+| `hymeko_clifford` | Clifford algebra: metric signature, dense multivectors, blade product, rotors and reverse-mode gradients for rotor chains |
+| `hymeko_spline` | Catmull-Rom, Chebyshev-CR, Kochanek-Bartels and NURBS kernels on flat `f32` slices, their closed forms and orthtree knots |
+| `hymeko_numerics` | Matrix-free solvers: restarted GMRES with a reusable workspace, preconditioned CG, Lanczos, L-BFGS, trust region, ADMM, FAS multigrid, Gauss-Newton and IRLS least squares, weighted diffusion and port-Hamiltonian operators |
+| `hymeko_vision` | Skeleton rasterisation and masking primitives |
+| `hymeko_numeric_vv` | Verification of the crates above: frozen oracles, finite-difference checks and manifest gates; not published, and no production crate depends on it |
+| `hymeko_tensor_py` | Python (pyo3) bindings to `hymeko_tensor`; not published |
 
-## Virtual operators and bounded planning
+`hymeko_tensor`, `hymeko_clifford`, `hymeko_numerics` and `hymeko_vision` have
+no dependencies in their default builds. `hymeko_tensor` adds COO/CSR storage
+and Rayon kernels with `sparse`, Nalgebra conversion with `interop` and Arrow
+schemas with `arrow-schema`. `hymeko_spline` uses Rayon only with `parallel`;
+its results are byte-identical with the feature on or off.
 
-`operator` provides ordered sparse-row gather/scatter, independent accumulator
-policies and range contractions without materializing a matrix product. Caller-owned
-workspaces retain storage across calls. `contraction` provides bounded branch-and-bound
-planning and sparse matrix-chain execution; reassociation is explicit because it
-can change floating-point results. Shannon entropy is an ordering descriptor, not
-a certified pruning bound.
+## Use
 
-`Pool::reclaim_completed_budgeted(watermark, max_checks)` inspects at most the stated
-number of retired resources. Incomplete epochs rotate behind the others and open
-sessions stay protected. The limit bounds epoch checks; allocation, eviction and
-backend destruction retain their own costs.
-
-## Validation and results
-
-The October 2026 release preparation passed **52 focused correctness tests**:
-33 compute-arena, 7 contraction-planning, 4 sparse matrix-chain and 8 virtual-operator
-tests. They cover invalid inputs, independent numerical references, ordering,
-buffer reuse and bounded reclamation. Run them with:
-
-```sh
-cargo test -p hymeko_tensor --features sparse --test compute_arena --test contraction_planning --test matrix_chain --test virtual_operators
+```toml
+[dependencies]
+hymeko_tensor = { git = "https://github.com/hymeko-framework/tensor.git" }
+hymeko_numerics = { git = "https://github.com/hymeko-framework/tensor.git" }
 ```
 
-The virtual operators are used by Core incidence projections and Graph PageRank.
-[Graph's retained performance evidence](https://github.com/hymeko-framework/graph/tree/main/docs/evidence/graph-algorithms)
-reports complete graph operations on explicit workloads. Those results are not
-standalone Tensor-kernel timings. No speedup is inferred from refactoring alone.
-
-## Build
+## Build and test
 
 ```sh
-cargo build -p hymeko_tensor --features sparse
+cargo test
+cargo test -p hymeko_tensor --features sparse
+cargo clippy --all-targets -- -D warnings
 ```
 
-Default Tensor features are empty. Sparse parallel kernels, interop and Arrow
-support are explicit features; Python bindings are a separate crate. Criterion
-benchmarks require explicit `cargo bench` invocation and are not the correctness
-commands above. The workspace does not track Cargo.lock; retain the resolved lock
-and toolchain when reproducing an experiment.
+`cargo test` covers the default members, every crate in the table.
+`.cargo/config.toml` enables SSE4.1 on x86-64, so the Catmull-Rom `floor`
+compiles to one instruction instead of a libm call; the results are
+bit-identical either way. The workspace does not track `Cargo.lock`.
 
-## Provenance and license
+The Python bindings build with [maturin](https://www.maturin.rs/) into one
+abi3 wheel for CPython 3.9 and later:
+`maturin build --release -m hymeko_tensor_py/pyproject.toml`.
 
-The repositories were split from the earlier HyMeKo workspace. Tensor received
-Core's generic numerical storage and compute-arena contracts in September 2026.
-Use the current owning repositories rather than historical copied implementations.
-See [LICENSE](LICENSE) and individual crate metadata for licensing declarations.
+`cargo dev-test` runs the integration tests against dynamic-library builds of
+the four production libraries, which shortens incremental rebuilds; it is
+described in [dev/README.txt](dev/README.txt). The default static build is
+unchanged by it.
+
+## Documentation
+
+[docs/gmres/mathematical-summary.pdf](docs/gmres/mathematical-summary.pdf) is a
+mathematical summary (in Hungarian) of the GMRES workspace, with its LaTeX
+source beside it.
+
+## License
+
+MIT; see [LICENSE](LICENSE).

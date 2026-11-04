@@ -41,7 +41,8 @@ fn catmull_rom_grad_coef_matches_central_differences() {
     let x: Vec<f32> = (0..n * channels).map(|_| r.next_f32()).collect();
     let grad_y: Vec<f32> = (0..n * channels).map(|_| r.next_f32()).collect();
 
-    let (_, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+    let (_, cache) =
+        catmull_rom_forward(&coef, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
     let analytic = catmull_rom_backward(&coef, &cache, &grad_y).grad_coef;
 
     // dL/dcoef_i for L = <grad_y, forward(coef)>, by central difference on coef_i.
@@ -50,9 +51,11 @@ fn catmull_rom_grad_coef_matches_central_differences() {
     for i in 0..coef.len() {
         let mut cp = coef.clone();
         cp[i] = coef[i] + h;
-        let (yp, _) = catmull_rom_forward(&cp, &x, n, channels, grid);
+        let (yp, _) =
+            catmull_rom_forward(&cp, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
         cp[i] = coef[i] - h;
-        let (ym, _) = catmull_rom_forward(&cp, &x, n, channels, grid);
+        let (ym, _) =
+            catmull_rom_forward(&cp, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
         numeric[i] = yp
             .iter()
             .zip(&ym)
@@ -76,7 +79,8 @@ fn catmull_rom_grad_x_matches_central_differences() {
     let x: Vec<f32> = (0..n * channels).map(|_| r.next_f32() * 0.8).collect();
     let grad_y: Vec<f32> = (0..n * channels).map(|_| r.next_f32()).collect();
 
-    let (_, cache) = catmull_rom_forward(&coef, &x, n, channels, grid);
+    let (_, cache) =
+        catmull_rom_forward(&coef, &x, n, channels, &hymeko_spline::Knots::uniform(grid));
     let analytic = catmull_rom_backward(&coef, &cache, &grad_y).grad_x;
 
     let h = 1e-3f32;
@@ -84,9 +88,21 @@ fn catmull_rom_grad_x_matches_central_differences() {
     for i in 0..x.len() {
         let mut xp = x.clone();
         xp[i] = x[i] + h;
-        let (yp, _) = catmull_rom_forward(&coef, &xp, n, channels, grid);
+        let (yp, _) = catmull_rom_forward(
+            &coef,
+            &xp,
+            n,
+            channels,
+            &hymeko_spline::Knots::uniform(grid),
+        );
         xp[i] = x[i] - h;
-        let (ym, _) = catmull_rom_forward(&coef, &xp, n, channels, grid);
+        let (ym, _) = catmull_rom_forward(
+            &coef,
+            &xp,
+            n,
+            channels,
+            &hymeko_spline::Knots::uniform(grid),
+        );
         // Only element i of the output row changes; the dot product picks it up regardless.
         numeric[i] = yp
             .iter()

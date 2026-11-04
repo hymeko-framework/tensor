@@ -18,6 +18,14 @@
 //! fixture. That is a deliberate two-step: a fixture that blesses itself on mismatch is not a
 //! fixture. Re-recording the **frozen** column is a statement that the historical capture was
 //! wrong, and needs a report entry saying why.
+//!
+//! **Re-recorded 2026-10-24, both Catmull-Rom columns** (Nagare plan 2026-10-23-incidence-partition,
+//! Amendment 7, C1; the user approved the power form and its re-pins). The frozen oracle is built from
+//! the production entry points by design, so the power form's rounding reaches it: its column still
+//! applies the retired clamp Jacobian, under today's arithmetic, and agrees with the 2026-08-25 bytes
+//! in their last bits only (9 of 21 values moved, by up to 12 ulp). The historical capture was right;
+//! its bytes stay in the history of this file (`28d4ee6`). The Kochanek-Bartels columns did not move.
+//! Report: `nagare/reports/2026-10-23-incidence-partition.md`.
 
 mod support;
 
@@ -60,7 +68,7 @@ fn columns() -> Vec<(&'static str, Vec<f32>)> {
     let (c, t, gy) = (coef(), tcb_raw(), grad_y());
     let x = frozen::saturating_probe(N, CH);
 
-    let (_, cr_cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cr_cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let cr_canonical = catmull_rom_backward(&c, &cr_cache, &gy).grad_x;
 
     let (_, kb_cache) = kb_forward(&c, &t, &x, N, CH, GRID);
@@ -211,7 +219,7 @@ fn the_probe_actually_saturates_on_both_sides_and_hits_both_endpoints() {
 fn frozen_and_canonical_differ_exactly_on_the_saturated_elements() {
     let (c, gy) = (coef(), grad_y());
     let x = frozen::saturating_probe(N, CH);
-    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
     let frozen_gx = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
 
@@ -284,7 +292,7 @@ fn on_a_wholly_interior_input_frozen_and_canonical_agree() {
     let x: Vec<f32> = (0..N * CH)
         .map(|i| -0.9 + 1.8 * (i as f32) / ((N * CH - 1) as f32))
         .collect();
-    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, GRID);
+    let (_, cache) = catmull_rom_forward(&c, &x, N, CH, &hymeko_spline::Knots::uniform(GRID));
     let canonical = catmull_rom_backward(&c, &cache, &gy).grad_x;
     let frozen_gx = frozen::cr_legacy_grad_x(&c, &x, N, CH, GRID, &gy);
     assert_eq!(
