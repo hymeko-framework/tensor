@@ -16,7 +16,7 @@ name = "hymeko_numeric_vv"
 version = "0.1.0"
 edition = "2021"
 description = "Downstream numerical verification & validation for the hymeko core crates: frozen oracles, cross-crate contract checks, finite-difference certification."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 publish = false
 
 [lib]
